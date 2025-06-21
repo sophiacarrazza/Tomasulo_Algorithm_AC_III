@@ -16,6 +16,7 @@ class ReservationStation:
 class ReservationStations:
     def __init__(self):
         self.stations = {
-            'INT': [ReservationStation('INT') for _ in range(4)],
-            'FP': [ReservationStation('FP') for _ in range(2)]
+            'INT': [ReservationStation('INT') for _ in range(6)],  # 2 ALUs + branches
+            'FP': [ReservationStation('FP') for _ in range(4)],    # FP ALU + MUL + DIV
+            'MEM': [ReservationStation('MEM') for _ in range(3)]   # Load/Store
         }

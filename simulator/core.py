@@ -36,9 +36,14 @@ class TomasuloCore:
             'bubbles': 0
         }
         self.execution_units = {
-            'INT': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
-            'FP': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
-            'MEM': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None}
+            'INT_ALU1': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'INT_ALU2': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'FP_ALU': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'FP_MUL': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'FP_DIV': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'MEM_LOAD': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'MEM_STORE': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
+            'BRANCH': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None}
         }
         self.memory = {}
         self.pc = 0
@@ -96,94 +101,130 @@ class TomasuloCore:
         return False
 
     def _issue(self):
-        """Fase de despacho de instruções"""
+        """Fase de despacho de instruções - Superescalar (múltiplas instruções por ciclo)"""
         if self.current_instruction >= len(self.instructions):
             return
             
-        instruction = self.instructions[self.current_instruction]
+        # Tentar despachar até 4 instruções por ciclo (grau de superescalar)
+        instructions_issued = 0
+        max_issue_per_cycle = 4
         
-        # Verificar se há espaço no ROB
-        if self.rob.entries[self.rob.tail].state == 'Empty':
-            # Verificar se há estação de reserva disponível
-            rs_type = self._get_rs_type(instruction['type'])
-            available_rs = self._find_available_rs(rs_type)
+        while (self.current_instruction < len(self.instructions) and 
+               instructions_issued < max_issue_per_cycle):
             
-            if available_rs is not None:
-                # Alocar entrada no ROB
-                rob_entry = self.rob.entries[self.rob.tail]
-                rob_entry.state = 'Issued'
-                rob_entry.instruction = instruction
-                # Para branch, destination é o próprio índice do ROB
-                if instruction['type'] == 'BRANCH':
-                    rob_entry.destination = self.rob.tail
-                else:
-                    rob_entry.destination = instruction['operands'][0]
+            instruction = self.instructions[self.current_instruction]
+            
+            # Verificar se há espaço no ROB
+            if self.rob.entries[self.rob.tail].state == 'Empty':
+                # Verificar se há estação de reserva disponível
+                rs_type = self._get_rs_type(instruction['type'])
+                available_rs = self._find_available_rs(rs_type)
                 
-                # Configurar estação de reserva
-                rs = available_rs
-                rs.busy = True
-                rs.op = instruction['opcode']
-                rs.dest = self.rob.tail
-                
-                # Verificar operandos
-                if len(instruction['operands']) > 1:
-                    operand1 = instruction['operands'][1]
-                    if operand1 in self.registers.tags:
-                        if self.registers.tags[operand1] is None:
-                            rs.vj = int(self.registers.values[operand1])
-                            rs.qj = None
-                        else:
-                            rs.vj = None
-                            rs.qj = self.registers.tags[operand1]
+                if available_rs is not None:
+                    # Alocar entrada no ROB
+                    rob_entry = self.rob.entries[self.rob.tail]
+                    rob_entry.state = 'Issued'
+                    rob_entry.instruction = instruction
+                    # Para branch, destination é o próprio índice do ROB
+                    if instruction['type'] == 'BRANCH':
+                        rob_entry.destination = self.rob.tail
                     else:
-                        rs.vj = 0
-                        rs.qj = None
-                
-                if len(instruction['operands']) > 2:
-                    operand2 = instruction['operands'][2]
-                    # CORREÇÃO: se não for registrador, tratar como imediato
-                    if instruction['opcode'] == 'ADDI':
-                        try:
-                            rs.vk = int(operand2)
-                            rs.qk = None
-                        except Exception:
+                        rob_entry.destination = instruction['operands'][0]
+                    
+                    # Configurar estação de reserva
+                    rs = available_rs
+                    rs.busy = True
+                    rs.op = instruction['opcode']
+                    rs.dest = self.rob.tail
+                    
+                    # Verificar operandos
+                    if len(instruction['operands']) > 1:
+                        operand1 = instruction['operands'][1]
+                        if operand1 in self.registers.tags:
+                            if self.registers.tags[operand1] is None:
+                                rs.vj = int(self.registers.values[operand1])
+                                rs.qj = None
+                            else:
+                                rs.vj = None
+                                rs.qj = self.registers.tags[operand1]
+                        else:
+                            rs.vj = 0
+                            rs.qj = None
+                    
+                    if len(instruction['operands']) > 2:
+                        operand2 = instruction['operands'][2]
+                        # CORREÇÃO: se não for registrador, tratar como imediato
+                        if instruction['opcode'] == 'ADDI':
+                            try:
+                                rs.vk = int(operand2)
+                                rs.qk = None
+                            except Exception:
+                                rs.vk = 0
+                                rs.qk = None
+                        elif operand2 in self.registers.tags:
+                            if self.registers.tags[operand2] is None:
+                                rs.vk = int(self.registers.values[operand2])
+                                rs.qk = None
+                            else:
+                                rs.vk = None
+                                rs.qk = self.registers.tags[operand2]
+                        else:
                             rs.vk = 0
                             rs.qk = None
-                    elif operand2 in self.registers.tags:
-                        if self.registers.tags[operand2] is None:
-                            rs.vk = int(self.registers.values[operand2])
-                            rs.qk = None
-                        else:
-                            rs.vk = None
-                            rs.qk = self.registers.tags[operand2]
-                    else:
-                        rs.vk = 0
-                        rs.qk = None
-                
-                # Definir latência da instrução
-                rs.cycles_remaining = self._get_latency(instruction['opcode'])
-                
-                # Atualizar registrador de destino (exceto branch)
-                if instruction['type'] != 'BRANCH' and instruction['operands'][0] in self.registers.tags:
-                    self.registers.tags[instruction['operands'][0]] = self.rob.tail
-                
-                # Atualizar tail do ROB
-                self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
-                
-                self.current_instruction += 1
+                    
+                    # Definir latência da instrução
+                    rs.cycles_remaining = self._get_latency(instruction['opcode'])
+                    
+                    # Atualizar registrador de destino (exceto branch)
+                    if instruction['type'] != 'BRANCH' and instruction['operands'][0] in self.registers.tags:
+                        self.registers.tags[instruction['operands'][0]] = self.rob.tail
+                    
+                    # Atualizar tail do ROB
+                    self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
+                    
+                    self.current_instruction += 1
+                    instructions_issued += 1
+                else:
+                    # Não há estação de reserva disponível - stall
+                    self.metrics['stalls'] += 1
+                    break  # Parar de tentar despachar mais instruções
             else:
+                # Não há espaço no ROB - stall
                 self.metrics['stalls'] += 1
-        else:
-            self.metrics['stalls'] += 1
+                break  # Parar de tentar despachar mais instruções
 
     def _execute(self):
-        """Fase de execução"""
+        """Fase de execução - Superescalar (execução paralela em múltiplas unidades)"""
+        # Executar em todas as estações de reserva em paralelo
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
                 if rs.busy and rs.qj is None and rs.qk is None and rs.cycles_remaining > 0:
                     rs.cycles_remaining -= 1
                     if rs.cycles_remaining == 0:
                         result = self._execute_instruction(rs.op, rs.vj, rs.vk)
+                        rs.result = int(result) if result is not None else 0
+                        rs.ready = True
+                        
+        # Executar instruções de memória em paralelo com instruções aritméticas
+        # (simulando unidades funcionais separadas)
+        self._execute_memory_operations()
+
+    def _execute_memory_operations(self):
+        """Executa operações de memória em paralelo"""
+        # Buscar instruções de memória prontas para execução
+        for rs_type, stations in self.reservation_stations.stations.items():
+            for rs in stations:
+                if (rs.busy and rs.qj is None and rs.qk is None and 
+                    rs.op in ['LW', 'SW'] and rs.cycles_remaining > 0):
+                    rs.cycles_remaining -= 1
+                    if rs.cycles_remaining == 0:
+                        if rs.op == 'LW':
+                            # Load: usar vj como endereço
+                            result = self.memory.get(rs.vj, 0)
+                        else:  # SW
+                            # Store: usar vj como endereço, vk como valor
+                            self.memory[rs.vj] = rs.vk
+                            result = rs.vk
                         rs.result = int(result) if result is not None else 0
                         rs.ready = True
 
@@ -202,23 +243,32 @@ class TomasuloCore:
                     rs.ready = False
 
     def _commit(self):
-        """Fase de commit"""
-        head_entry = self.rob.entries[self.rob.head]
-        if head_entry.state != 'Empty' and head_entry.ready:
-            if head_entry.instruction and head_entry.instruction['type'] == 'BRANCH':
-                self._handle_branch_commit(head_entry)
+        """Fase de commit - Superescalar (múltiplas instruções por ciclo)"""
+        # Tentar fazer commit de até 4 instruções por ciclo
+        commits_this_cycle = 0
+        max_commit_per_cycle = 4
+        
+        while commits_this_cycle < max_commit_per_cycle:
+            head_entry = self.rob.entries[self.rob.head]
+            if head_entry.state != 'Empty' and head_entry.ready:
+                if head_entry.instruction and head_entry.instruction['type'] == 'BRANCH':
+                    self._handle_branch_commit(head_entry)
+                else:
+                    if head_entry.destination and head_entry.destination in self.registers.tags:
+                        self.registers.values[head_entry.destination] = head_entry.value
+                        self.registers.tags[head_entry.destination] = None
+                # Limpar entrada do ROB
+                head_entry.state = 'Empty'
+                head_entry.instruction = None
+                head_entry.destination = None
+                head_entry.value = None
+                head_entry.ready = False
+                self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
+                self.metrics['completed_instructions'] += 1
+                commits_this_cycle += 1
             else:
-                if head_entry.destination and head_entry.destination in self.registers.tags:
-                    self.registers.values[head_entry.destination] = head_entry.value
-                    self.registers.tags[head_entry.destination] = None
-            # Limpar entrada do ROB
-            head_entry.state = 'Empty'
-            head_entry.instruction = None
-            head_entry.destination = None
-            head_entry.value = None
-            head_entry.ready = False
-            self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
-            self.metrics['completed_instructions'] += 1
+                # Não há instrução pronta para commit
+                break
 
     def _execute_instruction(self, opcode, vj, vk):
         """Executa uma instrução e retorna o resultado"""
@@ -261,6 +311,8 @@ class TomasuloCore:
             return 'INT'
         elif instruction_type in ['FP']:
             return 'FP'
+        elif instruction_type in ['MEM']:
+            return 'MEM'
         else:
             return 'INT'  # Default
 
