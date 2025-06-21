@@ -59,6 +59,10 @@ class TomasuloCore:
 
     def cycle_step(self):
         """Executa um ciclo completo do algoritmo de Tomasulo"""
+        # Verificar se ainda há trabalho para fazer
+        if not self._has_work_to_do():
+            return False  # Retorna False se não há mais trabalho
+            
         if self.flush_needed:
             self._flush_pipeline()
             self.flush_needed = False
@@ -70,6 +74,26 @@ class TomasuloCore:
         
         self.cycle += 1
         self._update_metrics()
+        return True  # Retorna True se ainda há trabalho
+
+    def _has_work_to_do(self):
+        """Verifica se ainda há trabalho para fazer"""
+        # Verificar se ainda há instruções para processar
+        if self.current_instruction < len(self.instructions):
+            return True
+            
+        # Verificar se há instruções pendentes no ROB
+        for entry in self.rob.entries:
+            if entry.state != 'Empty':
+                return True
+                
+        # Verificar se há estações de reserva ocupadas
+        for rs_type, stations in self.reservation_stations.stations.items():
+            for rs in stations:
+                if rs.busy:
+                    return True
+                    
+        return False
 
     def _issue(self):
         """Fase de despacho de instruções"""
@@ -89,7 +113,11 @@ class TomasuloCore:
                 rob_entry = self.rob.entries[self.rob.tail]
                 rob_entry.state = 'Issued'
                 rob_entry.instruction = instruction
-                rob_entry.destination = instruction['operands'][0]
+                # Para branch, destination é o próprio índice do ROB
+                if instruction['type'] == 'BRANCH':
+                    rob_entry.destination = self.rob.tail
+                else:
+                    rob_entry.destination = instruction['operands'][0]
                 
                 # Configurar estação de reserva
                 rs = available_rs
@@ -100,27 +128,43 @@ class TomasuloCore:
                 # Verificar operandos
                 if len(instruction['operands']) > 1:
                     operand1 = instruction['operands'][1]
-                    if operand1 in self.registers.tags and self.registers.tags[operand1] is None:
-                        rs.vj = self.registers.values[operand1]
-                        rs.qj = None
+                    if operand1 in self.registers.tags:
+                        if self.registers.tags[operand1] is None:
+                            rs.vj = int(self.registers.values[operand1])
+                            rs.qj = None
+                        else:
+                            rs.vj = None
+                            rs.qj = self.registers.tags[operand1]
                     else:
-                        rs.vj = None
-                        rs.qj = self.registers.tags.get(operand1, None)
+                        rs.vj = 0
+                        rs.qj = None
                 
                 if len(instruction['operands']) > 2:
                     operand2 = instruction['operands'][2]
-                    if operand2 in self.registers.tags and self.registers.tags[operand2] is None:
-                        rs.vk = self.registers.values[operand2]
-                        rs.qk = None
+                    # CORREÇÃO: se não for registrador, tratar como imediato
+                    if instruction['opcode'] == 'ADDI':
+                        try:
+                            rs.vk = int(operand2)
+                            rs.qk = None
+                        except Exception:
+                            rs.vk = 0
+                            rs.qk = None
+                    elif operand2 in self.registers.tags:
+                        if self.registers.tags[operand2] is None:
+                            rs.vk = int(self.registers.values[operand2])
+                            rs.qk = None
+                        else:
+                            rs.vk = None
+                            rs.qk = self.registers.tags[operand2]
                     else:
-                        rs.vk = None
-                        rs.qk = self.registers.tags.get(operand2, None)
+                        rs.vk = 0
+                        rs.qk = None
                 
                 # Definir latência da instrução
                 rs.cycles_remaining = self._get_latency(instruction['opcode'])
                 
-                # Atualizar registrador de destino
-                if instruction['operands'][0] in self.registers.tags:
+                # Atualizar registrador de destino (exceto branch)
+                if instruction['type'] != 'BRANCH' and instruction['operands'][0] in self.registers.tags:
                     self.registers.tags[instruction['operands'][0]] = self.rob.tail
                 
                 # Atualizar tail do ROB
@@ -134,15 +178,13 @@ class TomasuloCore:
 
     def _execute(self):
         """Fase de execução"""
-        # Verificar estações de reserva prontas para execução
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
                 if rs.busy and rs.qj is None and rs.qk is None and rs.cycles_remaining > 0:
                     rs.cycles_remaining -= 1
                     if rs.cycles_remaining == 0:
-                        # Instrução terminou execução
                         result = self._execute_instruction(rs.op, rs.vj, rs.vk)
-                        rs.result = result
+                        rs.result = int(result) if result is not None else 0
                         rs.ready = True
 
     def _write_result(self):
@@ -150,44 +192,32 @@ class TomasuloCore:
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
                 if rs.busy and rs.ready:
-                    # Broadcast no CDB
                     self.cdb.broadcast(rs.result, rs.dest)
-                    
-                    # Atualizar estações de reserva que esperam este resultado
                     self._update_waiting_stations(rs.dest, rs.result)
-                    
-                    # Marcar entrada do ROB como pronta
-                    self.rob.entries[rs.dest].value = rs.result
-                    self.rob.entries[rs.dest].ready = True
-                    
-                    # Liberar estação de reserva
+                    # Marcar entrada do ROB como pronta para qualquer instrução
+                    if rs.dest is not None:
+                        self.rob.entries[rs.dest].value = rs.result
+                        self.rob.entries[rs.dest].ready = True
                     rs.busy = False
                     rs.ready = False
 
     def _commit(self):
         """Fase de commit"""
         head_entry = self.rob.entries[self.rob.head]
-        
         if head_entry.state != 'Empty' and head_entry.ready:
-            # Verificar se é uma instrução de branch
             if head_entry.instruction and head_entry.instruction['type'] == 'BRANCH':
                 self._handle_branch_commit(head_entry)
             else:
-                # Commit normal
-                if head_entry.destination and head_entry.destination in self.registers.values:
+                if head_entry.destination and head_entry.destination in self.registers.tags:
                     self.registers.values[head_entry.destination] = head_entry.value
                     self.registers.tags[head_entry.destination] = None
-            
             # Limpar entrada do ROB
             head_entry.state = 'Empty'
             head_entry.instruction = None
             head_entry.destination = None
             head_entry.value = None
             head_entry.ready = False
-            
-            # Atualizar head do ROB
             self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
-            
             self.metrics['completed_instructions'] += 1
 
     def _execute_instruction(self, opcode, vj, vk):
@@ -209,46 +239,6 @@ class TomasuloCore:
         # Instruções de imediato
         elif opcode == 'ADDI':
             return vj + vk  # vk é o valor imediato
-        elif opcode == 'SUBI':
-            return vj - vk
-        elif opcode == 'MULI':
-            return vj * vk
-        elif opcode == 'DIVI':
-            return vj // vk if vk != 0 else 0
-        elif opcode == 'ANDI':
-            return vj & vk
-        elif opcode == 'ORI':
-            return vj | vk
-        elif opcode == 'XORI':
-            return vj ^ vk
-        elif opcode == 'SLTI':
-            return 1 if vj < vk else 0
-        elif opcode == 'SLTIU':
-            return 1 if (vj & 0xFFFFFFFF) < (vk & 0xFFFFFFFF) else 0
-            
-        # Instruções lógicas
-        elif opcode == 'AND':
-            return vj & vk
-        elif opcode == 'OR':
-            return vj | vk
-        elif opcode == 'XOR':
-            return vj ^ vk
-        elif opcode == 'NOR':
-            return ~(vj | vk) & 0xFFFFFFFF
-            
-        # Instruções de shift
-        elif opcode == 'SLL':
-            return (vj << vk) & 0xFFFFFFFF
-        elif opcode == 'SRL':
-            return (vj >> vk) & 0xFFFFFFFF
-        elif opcode == 'SRA':
-            return (vj >> vk) & 0xFFFFFFFF  # Arithmetic shift
-        elif opcode == 'SLLI':
-            return (vj << vk) & 0xFFFFFFFF
-        elif opcode == 'SRLI':
-            return (vj >> vk) & 0xFFFFFFFF
-        elif opcode == 'SRAI':
-            return (vj >> vk) & 0xFFFFFFFF
             
         # Instruções de memória
         elif opcode == 'LW':
@@ -256,38 +246,12 @@ class TomasuloCore:
         elif opcode == 'SW':
             self.memory[vj] = vk
             return vk
-        elif opcode == 'LBU':
-            return self.memory.get(vj, 0) & 0xFF
-        elif opcode == 'LHU':
-            return self.memory.get(vj, 0) & 0xFFFF
-        elif opcode == 'SB':
-            self.memory[vj] = vk & 0xFF
-            return vk
-        elif opcode == 'SH':
-            self.memory[vj] = vk & 0xFFFF
-            return vk
             
         # Instruções de branch
         elif opcode == 'BEQ':
             return 1 if vj == vk else 0
         elif opcode == 'BNE':
             return 1 if vj != vk else 0
-        elif opcode == 'BLT':
-            return 1 if vj < vk else 0
-        elif opcode == 'BLE':
-            return 1 if vj <= vk else 0
-        elif opcode == 'BGT':
-            return 1 if vj > vk else 0
-        elif opcode == 'BGE':
-            return 1 if vj >= vk else 0
-        elif opcode == 'J':
-            return 1  # Sempre toma o branch
-        elif opcode == 'JAL':
-            return 1  # Sempre toma o branch
-        elif opcode == 'JR':
-            return 1  # Sempre toma o branch
-        elif opcode == 'JALR':
-            return 1  # Sempre toma o branch
             
         return 0
 
@@ -314,22 +278,13 @@ class TomasuloCore:
             'ADD': 1, 'SUB': 1, 'MUL': 3, 'DIV': 10,
             
             # Instruções de imediato
-            'ADDI': 1, 'SUBI': 1, 'MULI': 3, 'DIVI': 10,
-            'ANDI': 1, 'ORI': 1, 'XORI': 1, 'SLTI': 1, 'SLTIU': 1,
-            
-            # Instruções lógicas
-            'AND': 1, 'OR': 1, 'XOR': 1, 'NOR': 1,
-            
-            # Instruções de shift
-            'SLL': 1, 'SRL': 1, 'SRA': 1,
-            'SLLI': 1, 'SRLI': 1, 'SRAI': 1,
+            'ADDI': 1,
             
             # Instruções de memória
-            'LW': 2, 'SW': 1, 'LBU': 2, 'LHU': 2, 'SB': 1, 'SH': 1,
+            'LW': 2, 'SW': 1,
             
             # Instruções de branch
-            'BEQ': 1, 'BNE': 1, 'BLT': 1, 'BLE': 1, 'BGT': 1, 'BGE': 1,
-            'J': 1, 'JAL': 1, 'JR': 1, 'JALR': 1
+            'BEQ': 1, 'BNE': 1
         }
         return latencies.get(opcode, 1)
 
@@ -347,8 +302,10 @@ class TomasuloCore:
 
     def _handle_branch_commit(self, rob_entry):
         """Trata o commit de uma instrução de branch"""
+        # Para branches, sempre assumir que não tomou o branch (especulação conservadora)
+        # Em uma implementação real, isso seria baseado no preditor de branch
         actual_taken = rob_entry.value == 1
-        predicted_taken = self.bp.predict(rob_entry.instruction['pc'])
+        predicted_taken = False  # Assumir que não toma o branch
         
         if actual_taken != predicted_taken:
             # Misprediction - flush pipeline

@@ -1,9 +1,11 @@
+from typing import Optional
+
 class ROBEntry:
     def __init__(self):
         self.state = 'Empty'
         self.instruction = None
-        self.destination = None
-        self.value = None
+        self.destination: Optional[int] = None
+        self.value: Optional[int] = None
         self.ready = False
 
 class ReorderBuffer:

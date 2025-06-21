@@ -148,6 +148,17 @@ class TomasuloGUI(tk.Tk):
         self.reg_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
         reg_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Painel de edição de registrador
+        edit_frame = ttk.Labelframe(reg_frame, text="Editar Registrador", padding=8)
+        edit_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=8, pady=8)
+        ttk.Label(edit_frame, text="Registrador:").pack(anchor=tk.W)
+        self.reg_edit_combo = ttk.Combobox(edit_frame, values=[f"R{i}" for i in range(32)], state="readonly")
+        self.reg_edit_combo.pack(fill=tk.X, pady=2)
+        ttk.Label(edit_frame, text="Novo valor:").pack(anchor=tk.W, pady=(8,0))
+        self.reg_edit_value = tk.Entry(edit_frame)
+        self.reg_edit_value.pack(fill=tk.X, pady=2)
+        ttk.Button(edit_frame, text="Atualizar", command=self._update_register_value, style='TButton').pack(pady=8, fill=tk.X)
+
     def _create_memory_panel(self):
         mem_frame = ttk.Frame(self.notebook)
         self.notebook.add(mem_frame, text="Memória")
@@ -169,54 +180,44 @@ MUL R4, R1, R5
 
 # Instruções de imediato
 ADDI R6, R4, 10
-SUBI R7, R6, 5
-ANDI R8, R7, 0xFF
-ORI R9, R8, 0x100
-
-# Instruções lógicas
-AND R10, R9, R8
-OR R11, R10, R7
-XOR R12, R11, R6
-
-# Instruções de shift
-SLLI R13, R12, 2
-SRLI R14, R13, 1
+SUB R7, R6, R5
 
 # Instruções de memória
-LW R15, 100
-SW R14, 200
+LW R8, 100
+SW R7, 200
 
 # Instruções de branch
 BEQ R1, R2, 8
 BNE R3, R4, 12
-BLT R5, R6, 16
 
-# Instruções de comparação
-SLTI R16, R15, 50
-SLTIU R17, R16, 100"""
+# Mais operações aritméticas
+DIV R9, R8, R1
+ADD R10, R9, R6"""
         self.program_text.delete(1.0, tk.END)
         self.program_text.insert(1.0, sample_program)
         self.load_program_from_text()
 
     def step(self):
-        if self.core.current_instruction < len(self.core.instructions) or self._has_pending_instructions():
-            self.core.cycle_step()
+        """Executa um ciclo da simulação"""
+        if self.core.cycle_step():
             self.update_gui()
         else:
             messagebox.showinfo("Simulação", "Todas as instruções foram executadas!")
 
     def run_simulation(self):
+        """Executa a simulação continuamente"""
         if not self.is_running:
             self.is_running = True
             self._run_continuous()
 
     def _run_continuous(self):
-        if self.is_running and (self.core.current_instruction < len(self.core.instructions) or self._has_pending_instructions()):
-            self.step()
-            self.after(400, self._run_continuous)  # 400ms entre ciclos
-        else:
-            self.is_running = False
-            if self.core.current_instruction >= len(self.core.instructions) and not self._has_pending_instructions():
+        """Execução contínua da simulação"""
+        if self.is_running:
+            if self.core.cycle_step():
+                self.update_gui()
+                self.after(400, self._run_continuous)  # 400ms entre ciclos
+            else:
+                self.is_running = False
                 messagebox.showinfo("Simulação", "Todas as instruções foram executadas!")
 
     def stop(self):
@@ -237,14 +238,8 @@ SLTIU R17, R16, 100"""
         self.update_gui()
 
     def _has_pending_instructions(self):
-        for entry in self.core.rob.entries:
-            if entry.state != 'Empty':
-                return True
-        for rs_type, stations in self.core.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy:
-                    return True
-        return False
+        """Verifica se há instruções pendentes no pipeline"""
+        return self.core._has_work_to_do()
 
     def update_gui(self):
         state = self.core.get_state()
@@ -308,6 +303,19 @@ SLTIU R17, R16, 100"""
         self.mem_tree.delete(*self.mem_tree.get_children())
         for address, value in self.core.memory.items():
             self.mem_tree.insert('', 'end', values=(address, value))
+
+    def _update_register_value(self):
+        reg = self.reg_edit_combo.get()
+        try:
+            value = int(self.reg_edit_value.get())
+        except Exception:
+            messagebox.showerror("Erro", "Digite um valor inteiro válido!")
+            return
+        if reg in self.core.registers.values:
+            self.core.registers.values[reg] = value
+            self.update_gui()
+        else:
+            messagebox.showerror("Erro", f"Registrador {reg} não existe!")
 
     def run(self):
         self.mainloop()

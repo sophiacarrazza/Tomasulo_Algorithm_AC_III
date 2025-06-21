@@ -1,15 +1,17 @@
+from typing import Optional
+
 class ReservationStation:
     def __init__(self, rs_type):
         self.busy = False
         self.op = None
-        self.vj = None
-        self.vk = None
-        self.qj = None
-        self.qk = None
-        self.dest = None  # Pode ser int (índice do ROB) ou None
+        self.vj: Optional[int] = None
+        self.vk: Optional[int] = None
+        self.qj: Optional[int] = None
+        self.qk: Optional[int] = None
+        self.dest: Optional[int] = None  # Pode ser int (índice do ROB) ou None
         self.cycles_remaining = 0
         self.ready = False
-        self.result = None  # Pode ser int ou None
+        self.result: Optional[int] = None
 
 class ReservationStations:
     def __init__(self):

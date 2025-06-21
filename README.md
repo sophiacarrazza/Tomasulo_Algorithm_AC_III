@@ -50,61 +50,37 @@ O simulador suporta as seguintes instruções MIPS:
 
 #### Instruções Aritméticas
 - **Básicas**: ADD, SUB, MUL, DIV
-- **Imediato**: ADDI, SUBI, MULI, DIVI
-
-#### Instruções Lógicas
-- **Básicas**: AND, OR, XOR, NOR
-- **Imediato**: ANDI, ORI, XORI
-
-#### Instruções de Shift
-- **Básicas**: SLL, SRL, SRA
-- **Imediato**: SLLI, SRLI, SRAI
+- **Imediato**: ADDI
 
 #### Instruções de Memória
-- **Load**: LW, LBU, LHU
-- **Store**: SW, SB, SH
+- **Load**: LW
+- **Store**: SW
 
 #### Instruções de Branch
-- **Condicionais**: BEQ, BNE, BLT, BLE, BGT, BGE
-- **Incondicionais**: J, JAL, JR, JALR
-
-#### Instruções de Comparação
-- **Imediato**: SLTI, SLTIU
+- **Condicionais**: BEQ, BNE
 
 ### Exemplo de Programa
 
 ```mips
-# Programa de exemplo demonstrando várias instruções
+# Programa de exemplo demonstrando as instruções suportadas
 ADD R1, R2, R3      # R1 = R2 + R3
 MUL R4, R1, R5      # R4 = R1 * R5 (dependência de R1)
 
 # Instruções de imediato
 ADDI R6, R4, 10     # R6 = R4 + 10
-SUBI R7, R6, 5      # R7 = R6 - 5
-ANDI R8, R7, 0xFF   # R8 = R7 & 0xFF
-ORI R9, R8, 0x100   # R9 = R8 | 0x100
-
-# Instruções lógicas
-AND R10, R9, R8     # R10 = R9 & R8
-OR R11, R10, R7     # R11 = R10 | R7
-XOR R12, R11, R6    # R12 = R11 ^ R6
-
-# Instruções de shift
-SLLI R13, R12, 2    # R13 = R12 << 2
-SRLI R14, R13, 1    # R14 = R13 >> 1
+SUB R7, R6, R5      # R7 = R6 - R5
 
 # Instruções de memória
-LW R15, 100         # R15 = Memory[100]
-SW R14, 200         # Memory[200] = R14
+LW R8, 100          # R8 = Memory[100]
+SW R7, 200          # Memory[200] = R7
 
 # Instruções de branch
 BEQ R1, R2, 8       # Branch se R1 == R2
 BNE R3, R4, 12      # Branch se R3 != R4
-BLT R5, R6, 16      # Branch se R5 < R6
 
-# Instruções de comparação
-SLTI R16, R15, 50   # R16 = (R15 < 50) ? 1 : 0
-SLTIU R17, R16, 100 # R17 = (R16 < 100) ? 1 : 0
+# Mais operações aritméticas
+DIV R9, R8, R1      # R9 = R8 / R1
+ADD R10, R9, R6     # R10 = R9 + R6
 ```
 
 ## Arquitetura do Simulador
