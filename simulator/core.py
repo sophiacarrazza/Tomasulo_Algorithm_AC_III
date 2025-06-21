@@ -192,6 +192,11 @@ class TomasuloCore:
 
     def _execute_instruction(self, opcode, vj, vk):
         """Executa uma instrução e retorna o resultado"""
+        # Verificar se os operandos são válidos
+        if vj is None or vk is None:
+            return 0
+            
+        # Instruções aritméticas básicas
         if opcode == 'ADD':
             return vj + vk
         elif opcode == 'SUB':
@@ -200,13 +205,90 @@ class TomasuloCore:
             return vj * vk
         elif opcode == 'DIV':
             return vj // vk if vk != 0 else 0
+            
+        # Instruções de imediato
+        elif opcode == 'ADDI':
+            return vj + vk  # vk é o valor imediato
+        elif opcode == 'SUBI':
+            return vj - vk
+        elif opcode == 'MULI':
+            return vj * vk
+        elif opcode == 'DIVI':
+            return vj // vk if vk != 0 else 0
+        elif opcode == 'ANDI':
+            return vj & vk
+        elif opcode == 'ORI':
+            return vj | vk
+        elif opcode == 'XORI':
+            return vj ^ vk
+        elif opcode == 'SLTI':
+            return 1 if vj < vk else 0
+        elif opcode == 'SLTIU':
+            return 1 if (vj & 0xFFFFFFFF) < (vk & 0xFFFFFFFF) else 0
+            
+        # Instruções lógicas
+        elif opcode == 'AND':
+            return vj & vk
+        elif opcode == 'OR':
+            return vj | vk
+        elif opcode == 'XOR':
+            return vj ^ vk
+        elif opcode == 'NOR':
+            return ~(vj | vk) & 0xFFFFFFFF
+            
+        # Instruções de shift
+        elif opcode == 'SLL':
+            return (vj << vk) & 0xFFFFFFFF
+        elif opcode == 'SRL':
+            return (vj >> vk) & 0xFFFFFFFF
+        elif opcode == 'SRA':
+            return (vj >> vk) & 0xFFFFFFFF  # Arithmetic shift
+        elif opcode == 'SLLI':
+            return (vj << vk) & 0xFFFFFFFF
+        elif opcode == 'SRLI':
+            return (vj >> vk) & 0xFFFFFFFF
+        elif opcode == 'SRAI':
+            return (vj >> vk) & 0xFFFFFFFF
+            
+        # Instruções de memória
         elif opcode == 'LW':
             return self.memory.get(vj, 0)
         elif opcode == 'SW':
             self.memory[vj] = vk
             return vk
+        elif opcode == 'LBU':
+            return self.memory.get(vj, 0) & 0xFF
+        elif opcode == 'LHU':
+            return self.memory.get(vj, 0) & 0xFFFF
+        elif opcode == 'SB':
+            self.memory[vj] = vk & 0xFF
+            return vk
+        elif opcode == 'SH':
+            self.memory[vj] = vk & 0xFFFF
+            return vk
+            
+        # Instruções de branch
         elif opcode == 'BEQ':
             return 1 if vj == vk else 0
+        elif opcode == 'BNE':
+            return 1 if vj != vk else 0
+        elif opcode == 'BLT':
+            return 1 if vj < vk else 0
+        elif opcode == 'BLE':
+            return 1 if vj <= vk else 0
+        elif opcode == 'BGT':
+            return 1 if vj > vk else 0
+        elif opcode == 'BGE':
+            return 1 if vj >= vk else 0
+        elif opcode == 'J':
+            return 1  # Sempre toma o branch
+        elif opcode == 'JAL':
+            return 1  # Sempre toma o branch
+        elif opcode == 'JR':
+            return 1  # Sempre toma o branch
+        elif opcode == 'JALR':
+            return 1  # Sempre toma o branch
+            
         return 0
 
     def _get_rs_type(self, instruction_type):
@@ -228,8 +310,26 @@ class TomasuloCore:
     def _get_latency(self, opcode):
         """Retorna a latência de uma instrução"""
         latencies = {
+            # Instruções aritméticas básicas
             'ADD': 1, 'SUB': 1, 'MUL': 3, 'DIV': 10,
-            'LW': 2, 'SW': 1, 'BEQ': 1
+            
+            # Instruções de imediato
+            'ADDI': 1, 'SUBI': 1, 'MULI': 3, 'DIVI': 10,
+            'ANDI': 1, 'ORI': 1, 'XORI': 1, 'SLTI': 1, 'SLTIU': 1,
+            
+            # Instruções lógicas
+            'AND': 1, 'OR': 1, 'XOR': 1, 'NOR': 1,
+            
+            # Instruções de shift
+            'SLL': 1, 'SRL': 1, 'SRA': 1,
+            'SLLI': 1, 'SRLI': 1, 'SRAI': 1,
+            
+            # Instruções de memória
+            'LW': 2, 'SW': 1, 'LBU': 2, 'LHU': 2, 'SB': 1, 'SH': 1,
+            
+            # Instruções de branch
+            'BEQ': 1, 'BNE': 1, 'BLT': 1, 'BLE': 1, 'BGT': 1, 'BGE': 1,
+            'J': 1, 'JAL': 1, 'JR': 1, 'JALR': 1
         }
         return latencies.get(opcode, 1)
 

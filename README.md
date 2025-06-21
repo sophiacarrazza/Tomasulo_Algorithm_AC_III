@@ -48,22 +48,63 @@ A interface gráfica inclui:
 
 O simulador suporta as seguintes instruções MIPS:
 
-- **Aritméticas**: ADD, SUB, MUL, DIV
-- **Memória**: LW (Load Word), SW (Store Word)
-- **Branches**: BEQ (Branch if Equal), BNE (Branch if Not Equal), J (Jump), JAL (Jump and Link)
+#### Instruções Aritméticas
+- **Básicas**: ADD, SUB, MUL, DIV
+- **Imediato**: ADDI, SUBI, MULI, DIVI
+
+#### Instruções Lógicas
+- **Básicas**: AND, OR, XOR, NOR
+- **Imediato**: ANDI, ORI, XORI
+
+#### Instruções de Shift
+- **Básicas**: SLL, SRL, SRA
+- **Imediato**: SLLI, SRLI, SRAI
+
+#### Instruções de Memória
+- **Load**: LW, LBU, LHU
+- **Store**: SW, SB, SH
+
+#### Instruções de Branch
+- **Condicionais**: BEQ, BNE, BLT, BLE, BGT, BGE
+- **Incondicionais**: J, JAL, JR, JALR
+
+#### Instruções de Comparação
+- **Imediato**: SLTI, SLTIU
 
 ### Exemplo de Programa
 
 ```mips
-# Programa de exemplo
+# Programa de exemplo demonstrando várias instruções
 ADD R1, R2, R3      # R1 = R2 + R3
 MUL R4, R1, R5      # R4 = R1 * R5 (dependência de R1)
-ADD R6, R4, R7      # R6 = R4 + R7 (dependência de R4)
+
+# Instruções de imediato
+ADDI R6, R4, 10     # R6 = R4 + 10
+SUBI R7, R6, 5      # R7 = R6 - 5
+ANDI R8, R7, 0xFF   # R8 = R7 & 0xFF
+ORI R9, R8, 0x100   # R9 = R8 | 0x100
+
+# Instruções lógicas
+AND R10, R9, R8     # R10 = R9 & R8
+OR R11, R10, R7     # R11 = R10 | R7
+XOR R12, R11, R6    # R12 = R11 ^ R6
+
+# Instruções de shift
+SLLI R13, R12, 2    # R13 = R12 << 2
+SRLI R14, R13, 1    # R14 = R13 >> 1
+
+# Instruções de memória
+LW R15, 100         # R15 = Memory[100]
+SW R14, 200         # Memory[200] = R14
+
+# Instruções de branch
 BEQ R1, R2, 8       # Branch se R1 == R2
-LW R8, 100          # Carrega da memória
-SW R9, 200          # Armazena na memória
-SUB R10, R8, R9     # R10 = R8 - R9
-DIV R11, R10, R1    # R11 = R10 / R1
+BNE R3, R4, 12      # Branch se R3 != R4
+BLT R5, R6, 16      # Branch se R5 < R6
+
+# Instruções de comparação
+SLTI R16, R15, 50   # R16 = (R15 < 50) ? 1 : 0
+SLTIU R17, R16, 100 # R17 = (R16 < 100) ? 1 : 0
 ```
 
 ## Arquitetura do Simulador
