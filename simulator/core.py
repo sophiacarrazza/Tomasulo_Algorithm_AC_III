@@ -111,7 +111,6 @@ class TomasuloCore:
         
         while (self.current_instruction < len(self.instructions) and 
                instructions_issued < max_issue_per_cycle):
-            
             instruction = self.instructions[self.current_instruction]
             
             # Verificar se há espaço no ROB
@@ -136,6 +135,14 @@ class TomasuloCore:
                     rs.busy = True
                     rs.op = instruction['opcode']
                     rs.dest = self.rob.tail
+                    
+                    # Capturar o tag do registrador de destino ANTES de atualizar
+                    dest_reg = None
+                    if instruction['type'] != 'BRANCH' and len(instruction['operands']) > 0:
+                        dest_reg = instruction['operands'][0]
+                        old_tag = self.registers.tags[dest_reg] if dest_reg in self.registers.tags else None
+                    else:
+                        old_tag = None
                     
                     # Verificar operandos
                     if len(instruction['operands']) > 1:
@@ -176,8 +183,9 @@ class TomasuloCore:
                     rs.cycles_remaining = self._get_latency(instruction['opcode'])
                     
                     # Atualizar registrador de destino (exceto branch)
-                    if instruction['type'] != 'BRANCH' and instruction['operands'][0] in self.registers.tags:
-                        self.registers.tags[instruction['operands'][0]] = self.rob.tail
+                    # CORREÇÃO: só atualizar o tag do registrador de destino DEPOIS de capturar dependências
+                    if dest_reg is not None and dest_reg in self.registers.tags:
+                        self.registers.tags[dest_reg] = self.rob.tail
                     
                     # Atualizar tail do ROB
                     self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
