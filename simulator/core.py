@@ -5,6 +5,13 @@ from simulator.components.reservation_station import ReservationStations
 from simulator.parser import parse_instruction
 import copy
 
+class ROBState:
+    EMPTY = 'Empty'
+    ISSUED = 'Issued'
+    EXECUTING = 'Executing'
+    WRITEBACK = 'Writeback'
+    COMMIT = 'Commit'
+
 class RegisterBank:
     def __init__(self):
         self.registers = {}
@@ -49,6 +56,30 @@ class TomasuloCore:
         self.pc = 0
         self.branch_misprediction = False
         self.flush_needed = False
+        self.state_stack = []  # Pilha para estados anteriores
+
+    def save_state(self):
+        # Salva uma cópia profunda do estado atual
+        state = {
+            'cycle': self.cycle,
+            'instructions': copy.deepcopy(self.instructions),
+            'current_instruction': self.current_instruction,
+            'reservation_stations': copy.deepcopy(self.reservation_stations),
+            'rob': copy.deepcopy(self.rob),
+            'registers': copy.deepcopy(self.registers),
+            # Adicione outros componentes se necessário
+        }
+        self.state_stack.append(state)
+
+    def restore_state(self):
+        if self.state_stack:
+            state = self.state_stack.pop()
+            self.cycle = state['cycle']
+            self.instructions = copy.deepcopy(state['instructions'])
+            self.current_instruction = state['current_instruction']
+            self.reservation_stations = copy.deepcopy(state['reservation_stations'])
+            self.rob = copy.deepcopy(state['rob'])
+            self.registers = copy.deepcopy(state['registers'])
 
     def load_program(self, program_text):
         """Carrega um programa MIPS"""
@@ -64,22 +95,26 @@ class TomasuloCore:
 
     def cycle_step(self):
         """Executa um ciclo completo do algoritmo de Tomasulo"""
-        # Verificar se ainda há trabalho para fazer
         if not self._has_work_to_do():
-            return False  # Retorna False se não há mais trabalho
-            
+            return False
+
         if self.flush_needed:
             self._flush_pipeline()
             self.flush_needed = False
-            
+
         self._commit()
         self._write_result()
         self._execute()
         self._issue()
-        
+
+        # 👇 Adicione a contagem de bolhas aqui 👇
+        self._count_bubbles()
+
+        # Atualiza IPC, stalls, etc
         self.cycle += 1
         self._update_metrics()
-        return True  # Retorna True se ainda há trabalho
+        return True
+
 
     def _has_work_to_do(self):
         """Verifica se ainda há trabalho para fazer"""
@@ -99,15 +134,25 @@ class TomasuloCore:
                     return True
                     
         return False
+    
+    def _count_bubbles(self):
+        bubbles_this_cycle = 0
+        for rs_type, stations in self.reservation_stations.stations.items():
+            for rs in stations:
+                if rs.busy and (rs.qj is not None or rs.qk is not None):
+                    bubbles_this_cycle += 1
+        self.metrics['bubbles'] += bubbles_this_cycle
+
 
     def _issue(self):
         """Fase de despacho de instruções - Superescalar (múltiplas instruções por ciclo)"""
+        
         if self.current_instruction >= len(self.instructions):
             return
             
         # Tentar despachar até 4 instruções por ciclo (grau de superescalar)
         instructions_issued = 0
-        max_issue_per_cycle = 4
+        max_issue_per_cycle = 2
         
         while (self.current_instruction < len(self.instructions) and 
                instructions_issued < max_issue_per_cycle):
@@ -160,24 +205,31 @@ class TomasuloCore:
                     
                     if len(instruction['operands']) > 2:
                         operand2 = instruction['operands'][2]
-                        # CORREÇÃO: se não for registrador, tratar como imediato
                         if instruction['opcode'] == 'ADDI':
+                            # Trata sempre como imediato
                             try:
                                 rs.vk = int(operand2)
                                 rs.qk = None
                             except Exception:
                                 rs.vk = 0
                                 rs.qk = None
-                        elif operand2 in self.registers.tags:
-                            if self.registers.tags[operand2] is None:
-                                rs.vk = int(self.registers.values[operand2])
-                                rs.qk = None
-                            else:
-                                rs.vk = None
-                                rs.qk = self.registers.tags[operand2]
                         else:
-                            rs.vk = 0
-                            rs.qk = None
+                            # Se for registrador
+                            if operand2 in self.registers.tags:
+                                if self.registers.tags[operand2] is None:
+                                    rs.vk = int(self.registers.values[operand2])
+                                    rs.qk = None
+                                else:
+                                    rs.vk = None
+                                    rs.qk = self.registers.tags[operand2]
+                            else:
+                                # Caso não seja registrador conhecido, trata como 0
+                                try:
+                                    rs.vk = int(operand2)
+                                    rs.qk = None
+                                except Exception:
+                                    rs.vk = 0
+                                    rs.qk = None
                     
                     # Definir latência da instrução
                     rs.cycles_remaining = self._get_latency(instruction['opcode'])
@@ -202,19 +254,27 @@ class TomasuloCore:
                 break  # Parar de tentar despachar mais instruções
 
     def _execute(self):
-        """Fase de execução - Superescalar (execução paralela em múltiplas unidades)"""
+    
         # Executar em todas as estações de reserva em paralelo
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
                 if rs.busy and rs.qj is None and rs.qk is None and rs.cycles_remaining > 0:
+                    # Se ainda estava no estado ISSUED, marca como EXECUTING no ROB
+                    rob_entry = self.rob.entries[rs.dest]
+                    if rob_entry.state == ROBState.ISSUED:
+                        rob_entry.state = ROBState.EXECUTING
+
+
+                    # Avança execução (decrementa ciclos restantes)
                     rs.cycles_remaining -= 1
+
+                    # Se terminou execução
                     if rs.cycles_remaining == 0:
                         result = self._execute_instruction(rs.op, rs.vj, rs.vk)
                         rs.result = int(result) if result is not None else 0
                         rs.ready = True
-                        
-        # Executar instruções de memória em paralelo com instruções aritméticas
-        # (simulando unidades funcionais separadas)
+
+    # Executar instruções de memória em paralelo com instruções aritméticas
         self._execute_memory_operations()
 
     def _execute_memory_operations(self):
@@ -247,36 +307,62 @@ class TomasuloCore:
                     if rs.dest is not None:
                         self.rob.entries[rs.dest].value = rs.result
                         self.rob.entries[rs.dest].ready = True
-                    rs.busy = False
+                    if rs.dest is not None:
+                        rob_entry = self.rob.entries[rs.dest]
+                        rob_entry.value = rs.result
+                        rob_entry.ready = True
+                        rob_entry.state = ROBState.WRITEBACK
+
+                # NÃO LIMPE O rs.busy AQUI! Deixe ele ocupado até a instrução realmente fazer Commit
                     rs.ready = False
 
     def _commit(self):
-        """Fase de commit - Superescalar (múltiplas instruções por ciclo)"""
-        # Tentar fazer commit de até 4 instruções por ciclo
         commits_this_cycle = 0
-        max_commit_per_cycle = 4
-        
+        max_commit_per_cycle = 2  # Pode ajustar conforme sua arquitetura
+
         while commits_this_cycle < max_commit_per_cycle:
             head_entry = self.rob.entries[self.rob.head]
-            if head_entry.state != 'Empty' and head_entry.ready:
+
+            if head_entry.state != ROBState.EMPTY and head_entry.ready:
                 if head_entry.instruction and head_entry.instruction['type'] == 'BRANCH':
                     self._handle_branch_commit(head_entry)
                 else:
-                    if head_entry.destination and head_entry.destination in self.registers.tags:
-                        self.registers.values[head_entry.destination] = head_entry.value
-                        self.registers.tags[head_entry.destination] = None
-                # Limpar entrada do ROB
-                head_entry.state = 'Empty'
+                    # Só escreve no registrador se ele ainda está esperando este ROB
+                    dest_reg = head_entry.destination
+                    if dest_reg and dest_reg in self.registers.tags:
+                        if self.registers.tags[dest_reg] == self.rob.head:
+                            self.registers.values[dest_reg] = head_entry.value
+                            self.registers.tags[dest_reg] = None
+
+                # Libera a estação de reserva correspondente
+                for rs_type, stations in self.reservation_stations.stations.items():
+                    for rs in stations:
+                        if rs.dest == self.rob.head:
+                            rs.busy = False
+                            rs.op = None
+                            rs.vj = None
+                            rs.vk = None
+                            rs.qj = None
+                            rs.qk = None
+                            rs.dest = None
+                            rs.result = None
+                            rs.cycles_remaining = 0
+                            rs.ready = False
+
+                # Limpa entrada do ROB
+                head_entry.state = ROBState.EMPTY
                 head_entry.instruction = None
                 head_entry.destination = None
                 head_entry.value = None
                 head_entry.ready = False
+
+                # Avança o head do ROB
                 self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
                 self.metrics['completed_instructions'] += 1
                 commits_this_cycle += 1
             else:
-                # Não há instrução pronta para commit
                 break
+
 
     def _execute_instruction(self, opcode, vj, vk):
         """Executa uma instrução e retorna o resultado"""
@@ -403,10 +489,10 @@ class TomasuloCore:
         }
 
     def _get_rob_state(self):
-        """Retorna o estado do ROB"""
+   
         rob_state = []
         for i, entry in enumerate(self.rob.entries):
-            if entry.state != 'Empty':
+            if entry.state != ROBState.EMPTY:
                 rob_state.append({
                     'index': i,
                     'state': entry.state,
@@ -416,6 +502,7 @@ class TomasuloCore:
                     'ready': entry.ready
                 })
         return rob_state
+
 
     def _get_rs_state(self):
         """Retorna o estado das estações de reserva"""

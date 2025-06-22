@@ -12,6 +12,7 @@ RESERVATION_STATIONS = {
 # Latências das instruções (em ciclos)
 INSTRUCTION_LATENCIES = {
     'ADD': 1,
+    'ADDI': 0,
     'SUB': 1,
     'MUL': 3,
     'DIV': 10,

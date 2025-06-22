@@ -13,7 +13,7 @@ class TomasuloGUI(tk.Tk):
         self.core = TomasuloCore()
         self.is_running = False
         self._create_widgets()
-        self._load_sample_program()
+        #self._load_sample_program()
 
     def _set_modern_theme(self):
         # Tons de roxo
@@ -50,7 +50,7 @@ class TomasuloGUI(tk.Tk):
         self._create_rob_panel()
         self._create_rs_panel()
         self._create_register_panel()
-        self._create_memory_panel()
+       
 
     def _create_control_panel(self, parent):
         control_frame = ttk.Labelframe(parent, text="Controles", padding=12)
@@ -59,9 +59,8 @@ class TomasuloGUI(tk.Tk):
         button_frame.pack(fill=tk.X, padx=8, pady=8)
         ttk.Button(button_frame, text="⏭ Step", command=self.step, style='TButton').pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(button_frame, text="▶ Run", command=self.run_simulation, style='TButton').pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(button_frame, text="⏹ Stop", command=self.stop, style='TButton').pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(button_frame, text="🔄 Reset", command=self.reset, style='TButton').pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(button_frame, text="📂 Load Program", command=self.load_program, style='TButton').pack(side=tk.LEFT)
+        
         info_frame = ttk.Frame(control_frame)
         info_frame.pack(fill=tk.X, padx=8, pady=(8, 0))
         ttk.Label(info_frame, text="Ciclo:", font=("Segoe UI", 13, "bold"), background="#ede9fe").pack(side=tk.LEFT)
@@ -73,6 +72,12 @@ class TomasuloGUI(tk.Tk):
         ttk.Label(info_frame, text="Total:", font=("Segoe UI", 13, "bold"), background="#ede9fe").pack(side=tk.LEFT)
         self.total_inst_label = ttk.Label(info_frame, text="0", font=("Segoe UI", 13, "bold"), background="#ede9fe", foreground="#7c3aed")
         self.total_inst_label.pack(side=tk.LEFT, padx=5)
+        self.back_button = ttk.Button(parent, text="⏪ Voltar", command=self.step_back)
+        self.back_button.pack(side="left", padx=5, pady=5)
+
+    def step_back(self):
+        self.core.restore_state()
+        self.update_gui()
 
     def _create_program_panel(self, parent):
         program_frame = ttk.Labelframe(parent, text="Programa MIPS", padding=12)
@@ -87,7 +92,6 @@ class TomasuloGUI(tk.Tk):
         metrics = [
             ('ipc', 'IPC:'),
             ('completed_instructions', 'Instruções Completadas:'),
-            ('stalls', 'Stalls:'),
             ('bubbles', 'Bubbles:'),
             ('total_instructions', 'Total de Instruções:')
         ]
@@ -120,7 +124,7 @@ class TomasuloGUI(tk.Tk):
         rs_notebook.add(int_frame, text="Integer")
         self._create_rs_tree(int_frame, 'INT')
         fp_frame = ttk.Frame(rs_notebook)
-        rs_notebook.add(fp_frame, text="Floating Point")
+
         self._create_rs_tree(fp_frame, 'FP')
 
     def _create_rs_tree(self, parent, rs_type):
@@ -159,18 +163,7 @@ class TomasuloGUI(tk.Tk):
         self.reg_edit_value.pack(fill=tk.X, pady=2)
         ttk.Button(edit_frame, text="Atualizar", command=self._update_register_value, style='TButton').pack(pady=8, fill=tk.X)
 
-    def _create_memory_panel(self):
-        mem_frame = ttk.Frame(self.notebook)
-        self.notebook.add(mem_frame, text="Memória")
-        columns = ('Address', 'Value')
-        self.mem_tree = ttk.Treeview(mem_frame, columns=columns, show='headings', height=15, style='Treeview')
-        for col in columns:
-            self.mem_tree.heading(col, text=col)
-            self.mem_tree.column(col, width=120, anchor=tk.CENTER)
-        mem_scrollbar = ttk.Scrollbar(mem_frame, orient=tk.VERTICAL, command=self.mem_tree.yview)
-        self.mem_tree.configure(yscrollcommand=mem_scrollbar.set)
-        self.mem_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
-        mem_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    
 
     def _load_sample_program(self):
         sample_program = """# Programa de exemplo para demonstrar o algoritmo de Tomasulo
