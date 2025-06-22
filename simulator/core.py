@@ -27,6 +27,7 @@ class RegisterBank:
 
 class TomasuloCore:
     def __init__(self):
+        self.state_stack = []
         self.cycle = 0
         self.instructions = []
         self.current_instruction = 0
@@ -94,7 +95,7 @@ class TomasuloCore:
         self.metrics['total_instructions'] = len(self.instructions)
 
     def cycle_step(self):
-        """Executa um ciclo completo do algoritmo de Tomasulo"""
+        self.save_state() 
         if not self._has_work_to_do():
             return False
 
@@ -107,7 +108,7 @@ class TomasuloCore:
         self._execute()
         self._issue()
 
-        # 👇 Adicione a contagem de bolhas aqui 👇
+   
         self._count_bubbles()
 
         # Atualiza IPC, stalls, etc
