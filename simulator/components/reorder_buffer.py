@@ -1,12 +1,18 @@
-from typing import Optional
+from typing import Optional, Dict, Any, Union
 
 class ROBEntry:
     def __init__(self):
-        self.state = 'Empty'
-        self.instruction = None
-        self.destination: Optional[int] = None
+        self.state: str = 'Empty'
+        self.instruction: Optional[Dict[str, Any]] = None
+        self.destination: Optional[Union[str, int]] = None # Registrador de destino (str) ou índice do ROB para desvios (int)
         self.value: Optional[int] = None
-        self.ready = False
+        self.ready: bool = False
+        # Campos para especulação de desvio
+        self.pc: int = -1
+        self.predicted_taken: Optional[bool] = None
+        self.actual_outcome: Optional[bool] = None
+        self.target_pc: int = -1
+        self.old_tag: Optional[int] = None
 
 class ReorderBuffer:
     def __init__(self, size=32):

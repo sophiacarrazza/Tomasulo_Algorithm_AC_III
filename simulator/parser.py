@@ -1,7 +1,10 @@
 def parse_instruction(line):
-    """Parse uma instrução MIPS"""
-    parts = line.replace(',', ' ').split()
-    if len(parts) < 1:
+    """Parse uma instrução MIPS, ignorando comentários."""
+    # Remove comentários da linha
+    line_without_comments = line.split('#')[0].strip()
+    
+    parts = line_without_comments.replace(',', ' ').split()
+    if not parts or not parts[0]:
         return None
     
     opcode = parts[0]

@@ -1,4 +1,4 @@
-from simulator.components.branch_predictor import TwoBitPredictor
+from simulator.components.branch_predictor import OneBitPredictor
 from simulator.components.cdb import CommonDataBus
 from simulator.components.reorder_buffer import ReorderBuffer
 from simulator.components.reservation_station import ReservationStations
@@ -35,13 +35,14 @@ class TomasuloCore:
         self.rob = ReorderBuffer(size=32)
         self.cdb = CommonDataBus()
         self.registers = RegisterBank()
-        self.bp = TwoBitPredictor()
+        self.bp = OneBitPredictor()
         self.metrics = {
             'ipc': 0.0,
             'stalls': 0,
             'total_instructions': 0,
             'completed_instructions': 0,
-            'bubbles': 0
+            'bubbles': 0,
+            'mispredictions': 0,
         }
         self.execution_units = {
             'INT_ALU1': {'busy': False, 'cycles_remaining': 0, 'current_instruction': None},
@@ -58,6 +59,9 @@ class TomasuloCore:
         self.branch_misprediction = False
         self.flush_needed = False
         self.state_stack = []  # Pilha para estados anteriores
+        self.label_map = {} # Mapeia labels para endereços de PC
+        self.flush_rob_entry_index = -1 # Guarda o índice do ROB da instrução de desvio que causou o flush
+        self.misprediction_target_pc = -1 # Guarda o PC de destino correto após uma predição errada
 
     def save_state(self):
         # Salva uma cópia profunda do estado atual
@@ -68,6 +72,8 @@ class TomasuloCore:
             'reservation_stations': copy.deepcopy(self.reservation_stations),
             'rob': copy.deepcopy(self.rob),
             'registers': copy.deepcopy(self.registers),
+            'pc': self.pc,
+            'flush_needed': self.flush_needed,
             # Adicione outros componentes se necessário
         }
         self.state_stack.append(state)
@@ -81,17 +87,47 @@ class TomasuloCore:
             self.reservation_stations = copy.deepcopy(state['reservation_stations'])
             self.rob = copy.deepcopy(state['rob'])
             self.registers = copy.deepcopy(state['registers'])
+            self.pc = state['pc']
+            self.flush_needed = state['flush_needed']
 
     def load_program(self, program_text):
-        """Carrega um programa MIPS"""
-        lines = program_text.strip().split('\n')
+        """Carrega um programa MIPS, mapeando labels primeiro."""
         self.instructions = []
+        self.label_map = {}
+        lines = program_text.strip().split('\n')
+        
+        # Primeiro passo: Mapear todas as labels para seus PCs
+        current_pc = 0
+        parsed_lines = []
         for line in lines:
-            if line.strip() and not line.strip().startswith('#'):
-                instruction = parse_instruction(line.strip())
-                if instruction:
-                    instruction['pc'] = len(self.instructions)
-                    self.instructions.append(instruction)
+            clean_line = line.strip()
+            if not clean_line or clean_line.startswith('#'):
+                continue
+            
+            if ':' in clean_line:
+                label, rest_of_line = clean_line.split(':', 1)
+                self.label_map[label.strip()] = current_pc
+                clean_line = rest_of_line.strip()
+            
+            if clean_line:
+                parsed_lines.append(clean_line)
+                current_pc += 1
+
+        # Segundo passo: Parsear as instruções
+        for pc, line in enumerate(parsed_lines):
+            instruction = parse_instruction(line)
+            if instruction:
+                instruction['pc'] = pc
+                # Resolver o alvo do branch para um PC
+                if instruction['type'] == 'BRANCH':
+                    label = instruction['operands'][2]
+                    if label in self.label_map:
+                        instruction['target_pc'] = self.label_map[label]
+                    else:
+                        # Tratar erro de label não encontrada se necessário
+                        instruction['target_pc'] = -1 # Indicador de erro
+                self.instructions.append(instruction)
+
         self.metrics['total_instructions'] = len(self.instructions)
 
     def cycle_step(self):
@@ -102,13 +138,15 @@ class TomasuloCore:
         if self.flush_needed:
             self._flush_pipeline()
             self.flush_needed = False
-
+            self.cycle += 1
+            self._update_metrics()
+            return True
         self._commit()
-        self._write_result()
         self._execute()
         self._issue()
+        self._write_result()
+        
 
-   
         self._count_bubbles()
 
         # Atualiza IPC, stalls, etc
@@ -116,11 +154,11 @@ class TomasuloCore:
         self._update_metrics()
         return True
 
-
     def _has_work_to_do(self):
         """Verifica se ainda há trabalho para fazer"""
-        # Verificar se ainda há instruções para processar
-        if self.current_instruction < len(self.instructions):
+        # Se o pipeline foi limpo, pode haver instruções no ROB para cometer
+        # mas o PC pode já ter chegado ao fim.
+        if self.pc < len(self.instructions):
             return True
             
         # Verificar se há instruções pendentes no ROB
@@ -144,139 +182,170 @@ class TomasuloCore:
                     bubbles_this_cycle += 1
         self.metrics['bubbles'] += bubbles_this_cycle
 
-
     def _issue(self):
         """Fase de despacho de instruções - Superescalar (múltiplas instruções por ciclo)"""
         
-        if self.current_instruction >= len(self.instructions):
+        # Não emite novas instruções se um flush estiver pendente
+        if self.flush_needed:
             return
-            
-        # Tentar despachar até 4 instruções por ciclo (grau de superescalar)
+
         instructions_issued = 0
-        max_issue_per_cycle = 2
+        max_issue_per_cycle = 2 # Grau de superescalar
         
-        while (self.current_instruction < len(self.instructions) and 
-               instructions_issued < max_issue_per_cycle):
-            instruction = self.instructions[self.current_instruction]
+        while self.pc < len(self.instructions) and instructions_issued < max_issue_per_cycle:
+            if self.rob.entries[self.rob.tail].state != 'Empty':
+                self.metrics['stalls'] += 1 # Stall por falta de espaço no ROB
+                break 
+
+            instruction = self.instructions[self.pc]
             
-            # Verificar se há espaço no ROB
-            if self.rob.entries[self.rob.tail].state == 'Empty':
-                # Verificar se há estação de reserva disponível
-                rs_type = self._get_rs_type(instruction['type'])
-                available_rs = self._find_available_rs(rs_type)
+            rs_type = self._get_rs_type(instruction['type'])
+            available_rs = self._find_available_rs(rs_type)
+            
+            if available_rs:
+                rob_entry_idx = self.rob.tail
+                rob_entry = self.rob.entries[rob_entry_idx]
                 
-                if available_rs is not None:
-                    # Alocar entrada no ROB
-                    rob_entry = self.rob.entries[self.rob.tail]
-                    rob_entry.state = 'Issued'
-                    rob_entry.instruction = instruction
-                    # Para branch, destination é o próprio índice do ROB
-                    if instruction['type'] == 'BRANCH':
-                        rob_entry.destination = self.rob.tail
-                    else:
-                        rob_entry.destination = instruction['operands'][0]
-                    
-                    # Configurar estação de reserva
-                    rs = available_rs
-                    rs.busy = True
-                    rs.op = instruction['opcode']
-                    rs.dest = self.rob.tail
-                    
-                    # Capturar o tag do registrador de destino ANTES de atualizar
-                    dest_reg = None
-                    if instruction['type'] != 'BRANCH' and len(instruction['operands']) > 0:
-                        dest_reg = instruction['operands'][0]
-                        old_tag = self.registers.tags[dest_reg] if dest_reg in self.registers.tags else None
-                    else:
-                        old_tag = None
-                    
-                    # Verificar operandos
-                    if len(instruction['operands']) > 1:
-                        operand1 = instruction['operands'][1]
-                        if operand1 in self.registers.tags:
-                            if self.registers.tags[operand1] is None:
-                                rs.vj = int(self.registers.values[operand1])
-                                rs.qj = None
-                            else:
-                                rs.vj = None
-                                rs.qj = self.registers.tags[operand1]
-                        else:
-                            rs.vj = 0
-                            rs.qj = None
-                    
-                    if len(instruction['operands']) > 2:
-                        operand2 = instruction['operands'][2]
-                        if instruction['opcode'] == 'ADDI':
-                            # Trata sempre como imediato
-                            try:
-                                rs.vk = int(operand2)
-                                rs.qk = None
-                            except Exception:
-                                rs.vk = 0
-                                rs.qk = None
-                        else:
-                            # Se for registrador
-                            if operand2 in self.registers.tags:
-                                if self.registers.tags[operand2] is None:
-                                    rs.vk = int(self.registers.values[operand2])
-                                    rs.qk = None
-                                else:
-                                    rs.vk = None
-                                    rs.qk = self.registers.tags[operand2]
-                            else:
-                                # Caso não seja registrador conhecido, trata como 0
-                                try:
-                                    rs.vk = int(operand2)
-                                    rs.qk = None
-                                except Exception:
-                                    rs.vk = 0
-                                    rs.qk = None
-                    
-                    # Definir latência da instrução
-                    rs.cycles_remaining = self._get_latency(instruction['opcode'])
-                    
-                    # Atualizar registrador de destino (exceto branch)
-                    # CORREÇÃO: só atualizar o tag do registrador de destino DEPOIS de capturar dependências
-                    if dest_reg is not None and dest_reg in self.registers.tags:
-                        self.registers.tags[dest_reg] = self.rob.tail
-                    
-                    # Atualizar tail do ROB
-                    self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
-                    
-                    self.current_instruction += 1
-                    instructions_issued += 1
+                # Preencher a entrada do ROB
+                rob_entry.state = 'Issued'
+                rob_entry.instruction = instruction
+                rob_entry.pc = instruction['pc']
+
+                # Lógica de desvio
+                is_branch = instruction['type'] == 'BRANCH'
+                predicted_taken = False
+                if is_branch:
+                    predicted_taken = self.bp.predict(instruction['pc'])
+                    rob_entry.destination = rob_entry_idx
+                    rob_entry.predicted_taken = predicted_taken
+                    rob_entry.target_pc = instruction.get('target_pc', -1)
                 else:
-                    # Não há estação de reserva disponível - stall
-                    self.metrics['stalls'] += 1
-                    break  # Parar de tentar despachar mais instruções
+                    rob_entry.destination = instruction['operands'][0]
+
+                # Renomeação de registradores e captura de operandos
+                rs = available_rs
+                rs.busy = True
+                rs.op = instruction['opcode']
+                rs.dest = rob_entry_idx
+                
+                dest_reg = None
+                if not is_branch:
+                    dest_reg = instruction['operands'][0]
+                    rob_entry.old_tag = self.registers.tags.get(dest_reg)
+                
+                # Lógica de operandos CORRIGIDA e REFINADA
+                op = instruction['opcode']
+                ops = instruction['operands']
+                src1_reg, src2_reg, immediate = None, None, None
+
+                # Identificar operandos fonte com base no formato da instrução MIPS
+                if op in ['ADD', 'SUB', 'MUL', 'DIV']: # R-type: op rd, rs, rt
+                    src1_reg, src2_reg = ops[1], ops[2]
+                elif op in ['ADDI']: # I-type: op rt, rs, imm
+                    src1_reg, immediate = ops[1], int(ops[2])
+                elif op in ['LW', 'SW']: # I-type: op rt, imm(rs)
+                    # Simplificação do parser: LW/SW rt, rs, imm
+                    src1_reg, immediate = ops[1], int(ops[2]) 
+                elif op in ['BEQ', 'BNE']: # I-type: op rs, rt, label
+                    src1_reg, src2_reg = ops[0], ops[1]
+                
+                # Preencher Vj e Qj (Primeiro operando fonte)
+                if src1_reg:
+                    tag = self.registers.tags.get(src1_reg)
+                    if tag is None:
+                        rs.vj = self.registers.values.get(src1_reg, 0)
+                        rs.qj = None
+                    else:
+                        rob_dep_entry = self.rob.entries[tag]
+                        if rob_dep_entry.ready:
+                            rs.vj = rob_dep_entry.value
+                            rs.qj = None
+                        else:
+                            rs.qj = tag
+                
+                # Preencher Vk e Qk (Segundo operando fonte ou imediato)
+                if src2_reg:
+                    tag = self.registers.tags.get(src2_reg)
+                    if tag is None:
+                        rs.vk = self.registers.values.get(src2_reg, 0)
+                        rs.qk = None
+                    else:
+                        rob_dep_entry = self.rob.entries[tag]
+                        if rob_dep_entry.ready:
+                            rs.vk = rob_dep_entry.value
+                            rs.qk = None
+                        else:
+                            rs.qk = tag
+                elif immediate is not None:
+                    # Para ADDI, LW, o segundo valor vem do imediato
+                    rs.vk = immediate
+                    rs.qk = None
+                
+                rs.cycles_remaining = self._get_latency(instruction['opcode'])
+                
+                if not is_branch and dest_reg:
+                    self.registers.tags[dest_reg] = rob_entry_idx
+                
+                self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
+                instructions_issued += 1
+
+                # Atualizar PC para a próxima instrução (especulativamente)
+                if is_branch and predicted_taken:
+                    self.pc = rob_entry.target_pc
+                else:
+                    self.pc += 1
             else:
-                # Não há espaço no ROB - stall
-                self.metrics['stalls'] += 1
-                break  # Parar de tentar despachar mais instruções
+                self.metrics['stalls'] += 1 # Stall por falta de ER
+                break # Não há estação de reserva, parar de emitir
 
     def _execute(self):
-    
-        # Executar em todas as estações de reserva em paralelo
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy and rs.qj is None and rs.qk is None and rs.cycles_remaining > 0:
-                    # Se ainda estava no estado ISSUED, marca como EXECUTING no ROB
-                    rob_entry = self.rob.entries[rs.dest]
-                    if rob_entry.state == ROBState.ISSUED:
-                        rob_entry.state = ROBState.EXECUTING
+        """Fase de execução das instruções prontas de forma superescalar."""
+        for rs in self.reservation_stations.stations['INT'] + self.reservation_stations.stations['FP'] + self.reservation_stations.stations['MEM']:
+            # Condição para executar: pronta e não já alocada a uma unidade
+            if rs.busy and rs.qj is None and rs.qk is None:
+                is_already_processing = any(unit['current_instruction'] is rs for unit in self.execution_units.values())
+                
+                if not is_already_processing:
+                    # Encontra uma unidade de execução livre do tipo correto
+                    unit_type_needed = self._get_execution_unit_type(rs.op)
+                    for unit_name, unit_state in self.execution_units.items():
+                        if unit_name.startswith(unit_type_needed) and not unit_state['busy']:
+                            unit_state['busy'] = True
+                            unit_state['current_instruction'] = rs
+                            break # Alocou, passa para a próxima ER
 
-
-                    # Avança execução (decrementa ciclos restantes)
+        # Decrementar contadores e finalizar execução para TODAS as unidades em paralelo
+        for unit, state in self.execution_units.items():
+            if state['busy'] and state['current_instruction'] is not None:
+                rs = state['current_instruction']
+                
+                if rs.cycles_remaining > 0:
                     rs.cycles_remaining -= 1
+                
+                if rs.cycles_remaining == 0:
+                    rob_entry = self.rob.entries[rs.dest]
+                    result = self._execute_instruction(rs.op, rs.vj, rs.vk)
+                    
+                    if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+                        actual_taken = bool(result)
+                        rob_entry.actual_outcome = actual_taken
+                        self.bp.update(rob_entry.pc, actual_taken)
 
-                    # Se terminou execução
-                    if rs.cycles_remaining == 0:
-                        result = self._execute_instruction(rs.op, rs.vj, rs.vk)
-                        rs.result = int(result) if result is not None else 0
-                        rs.ready = True
-
-    # Executar instruções de memória em paralelo com instruções aritméticas
-        self._execute_memory_operations()
+                        if rob_entry.predicted_taken != actual_taken:
+                            self.metrics['mispredictions'] += 1
+                            self.flush_needed = True
+                            self.flush_rob_entry_index = rs.dest
+                            if actual_taken:
+                                self.misprediction_target_pc = rob_entry.target_pc
+                            else:
+                                self.misprediction_target_pc = rob_entry.pc + 1
+                    
+                    rs.result = result
+                    rs.ready = True
+                    
+                    # Libera a unidade de execução para o próximo ciclo
+                    state['busy'] = False
+                    state['current_instruction'] = None
 
     def _execute_memory_operations(self):
         """Executa operações de memória em paralelo"""
@@ -302,68 +371,60 @@ class TomasuloCore:
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
                 if rs.busy and rs.ready:
+                    # Não libere a estação aqui. Apenas marque o ROB como pronto.
                     self.cdb.broadcast(rs.result, rs.dest)
                     self._update_waiting_stations(rs.dest, rs.result)
-                    # Marcar entrada do ROB como pronta para qualquer instrução
-                    if rs.dest is not None:
-                        self.rob.entries[rs.dest].value = rs.result
-                        self.rob.entries[rs.dest].ready = True
+                    
                     if rs.dest is not None:
                         rob_entry = self.rob.entries[rs.dest]
                         rob_entry.value = rs.result
                         rob_entry.ready = True
-                        rob_entry.state = ROBState.WRITEBACK
-
-                # NÃO LIMPE O rs.busy AQUI! Deixe ele ocupado até a instrução realmente fazer Commit
-                    rs.ready = False
+                        rob_entry.state = 'Writeback'
+                    
+                    # A estação permanece ocupada até o commit
+                    rs.ready = False # Previne re-broadcast no próximo ciclo
 
     def _commit(self):
-        commits_this_cycle = 0
-        max_commit_per_cycle = 2  # Pode ajustar conforme sua arquitetura
+        """Confirma até 4 instruções por ciclo."""
+        commit_count = 0
+        max_commit_per_cycle = 4
 
-        while commits_this_cycle < max_commit_per_cycle:
-            head_entry = self.rob.entries[self.rob.head]
+        while commit_count < max_commit_per_cycle:
+            rob_entry = self.rob.entries[self.rob.head]
 
-            if head_entry.state != ROBState.EMPTY and head_entry.ready:
-                if head_entry.instruction and head_entry.instruction['type'] == 'BRANCH':
-                    self._handle_branch_commit(head_entry)
-                else:
-                    # Só escreve no registrador se ele ainda está esperando este ROB
-                    dest_reg = head_entry.destination
-                    if dest_reg and dest_reg in self.registers.tags:
-                        if self.registers.tags[dest_reg] == self.rob.head:
-                            self.registers.values[dest_reg] = head_entry.value
-                            self.registers.tags[dest_reg] = None
-
-                # Libera a estação de reserva correspondente
-                for rs_type, stations in self.reservation_stations.stations.items():
-                    for rs in stations:
-                        if rs.dest == self.rob.head:
-                            rs.busy = False
-                            rs.op = None
-                            rs.vj = None
-                            rs.vk = None
-                            rs.qj = None
-                            rs.qk = None
-                            rs.dest = None
-                            rs.result = None
-                            rs.cycles_remaining = 0
-                            rs.ready = False
-
-                # Limpa entrada do ROB
-                head_entry.state = ROBState.EMPTY
-                head_entry.instruction = None
-                head_entry.destination = None
-                head_entry.value = None
-                head_entry.ready = False
-
-                # Avança o head do ROB
-                self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
-                self.metrics['completed_instructions'] += 1
-                commits_this_cycle += 1
-            else:
+            if rob_entry.state == 'Empty' or not rob_entry.ready:
                 break
 
+            if rob_entry.ready and rob_entry.instruction:
+                if rob_entry.instruction['type'] != 'BRANCH':
+                    dest_reg = rob_entry.destination
+                    if isinstance(dest_reg, str) and self.registers.tags.get(dest_reg) == self.rob.head:
+                        self.registers.values[dest_reg] = rob_entry.value
+                        self.registers.tags[dest_reg] = None
+                
+                # Para SW, atualiza a memória aqui
+                if rob_entry.instruction['opcode'] == 'SW':
+                    addr = rob_entry.value # Endereço calculado na fase de execução
+                    val_reg = rob_entry.instruction['operands'][0]
+                    # O valor a ser escrito vem do registrador de origem, que já deve estar pronto no ROB
+                    # Esta lógica pode precisar de refinamento, dependendo de como os valores dos operandos de SW são tratados
+                    # No momento, vamos assumir que o valor está em `vj` da RS, mas isso não é passado para o ROB.
+                    # Por simplicidade, vamos pular a atualização real da memória por enquanto.
+                    pass
+
+                # Agora, libere a estação de reserva associada a esta entrada do ROB
+                for stations in self.reservation_stations.stations.values():
+                    for rs in stations:
+                        if rs.dest == self.rob.head:
+                            rs.reset() # Reseta a estação para o estado inicial
+                            break
+                
+                self.metrics['completed_instructions'] += 1
+                rob_entry.__init__() # Reseta a entrada do ROB para 'Empty'
+                self.rob.head = (self.rob.head + 1) % len(self.rob.entries)
+                commit_count += 1
+            else:
+                break
 
     def _execute_instruction(self, opcode, vj, vk):
         """Executa uma instrução e retorna o resultado"""
@@ -447,35 +508,63 @@ class TomasuloCore:
                         rs.vk = value
                         rs.qk = None
 
-    def _handle_branch_commit(self, rob_entry):
-        """Trata o commit de uma instrução de branch"""
-        # Para branches, sempre assumir que não tomou o branch (especulação conservadora)
-        # Em uma implementação real, isso seria baseado no preditor de branch
-        actual_taken = rob_entry.value == 1
-        predicted_taken = False  # Assumir que não toma o branch
-        
-        if actual_taken != predicted_taken:
-            # Misprediction - flush pipeline
-            self.branch_misprediction = True
-            self.flush_needed = True
-            self.metrics['bubbles'] += 10  # Penalidade de branch
-
     def _flush_pipeline(self):
-        """Flush do pipeline após misprediction"""
-        # Limpar estações de reserva
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                rs.busy = False
-                rs.ready = False
+        """Limpa o pipeline após uma predição de desvio incorreta."""
+        # 1. Atualiza o PC para o caminho correto
+        self.pc = self.misprediction_target_pc
+
+        # 2. Limpa as instruções especulativas do ROB
+        # O tail do ROB aponta para a próxima posição livre. As instruções
+        # especulativas estão entre o desvio e o tail.
         
-        # Resetar registradores tags
-        for reg in self.registers.tags:
-            self.registers.tags[reg] = None
+        current_idx = (self.flush_rob_entry_index + 1) % len(self.rob.entries)
+        while current_idx != self.rob.tail:
+            entry_to_flush = self.rob.entries[current_idx]
+            if entry_to_flush.state != 'Empty':
+                # Restaura o tag do registrador de destino
+                if entry_to_flush.instruction and entry_to_flush.instruction['type'] != 'BRANCH':
+                    dest_reg = entry_to_flush.destination
+                    if dest_reg and self.registers.tags.get(dest_reg) == current_idx:
+                         self.registers.tags[dest_reg] = entry_to_flush.old_tag
+
+                # Limpa a entrada
+                entry_to_flush.__init__() # Reseta para o estado inicial
+
+            current_idx = (current_idx + 1) % len(self.rob.entries)
+        
+        # 3. Reposiciona o tail do ROB para depois do branch
+        self.rob.tail = (self.flush_rob_entry_index + 1) % len(self.rob.entries)
+
+        # 4. Limpa todas as estações de reserva
+        self.reservation_stations.reset()
+        
+        # 5. Limpa os flags de controle
+        self.flush_rob_entry_index = -1
+        self.misprediction_target_pc = -1
+        self.flush_needed = False
+
+    def _get_execution_unit_type(self, opcode):
+        """Mapeia um opcode para o TIPO de unidade de execução (genérico)."""
+        if opcode in ['ADD', 'SUB', 'ADDI']:
+            return 'INT_ALU'
+        elif opcode in ['MUL']:
+            return 'FP_MUL'
+        elif opcode in ['DIV']:
+            return 'FP_DIV'
+        elif opcode == 'LW':
+            return 'MEM_LOAD'
+        elif opcode == 'SW':
+            return 'MEM_STORE'
+        elif opcode in ['BNE', 'BEQ']:
+            return 'BRANCH'
+        return 'INT_ALU' # Padrão
 
     def _update_metrics(self):
-        """Atualiza métricas de desempenho"""
+        """Atualiza as métricas de desempenho."""
         if self.cycle > 0:
             self.metrics['ipc'] = self.metrics['completed_instructions'] / self.cycle
+        else:
+            self.metrics['ipc'] = 0.0
 
     def get_state(self):
         """Retorna o estado atual do simulador para a GUI"""
@@ -490,10 +579,10 @@ class TomasuloCore:
         }
 
     def _get_rob_state(self):
-   
+        """Retorna o estado do ROB para a GUI"""
         rob_state = []
         for i, entry in enumerate(self.rob.entries):
-            if entry.state != ROBState.EMPTY:
+            if entry.state != 'Empty':
                 rob_state.append({
                     'index': i,
                     'state': entry.state,
@@ -503,7 +592,6 @@ class TomasuloCore:
                     'ready': entry.ready
                 })
         return rob_state
-
 
     def _get_rs_state(self):
         """Retorna o estado das estações de reserva"""
