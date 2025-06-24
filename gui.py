@@ -184,10 +184,6 @@ class TomasuloGUI(tk.Tk):
         self.bp_mispred_label.pack(anchor=tk.W, pady=2)
         self.bp_total_label = ttk.Label(metrics_frame, text="Total de Previsões: 0", font=("Segoe UI", 12), foreground="#222")
         self.bp_total_label.pack(anchor=tk.W, pady=2)
-        self.bp_last_label = ttk.Label(metrics_frame, text="Última predição: -", font=("Segoe UI", 12), foreground="#222")
-        self.bp_last_label.pack(anchor=tk.W, pady=2)
-        self.bp_next_label = ttk.Label(metrics_frame, text="Próxima predição: -", font=("Segoe UI", 12), foreground="#2563eb")
-        self.bp_next_label.pack(anchor=tk.W, pady=2)
         # Alerta visual de flush
         self.bp_flush_alert = ttk.Label(bp_frame, text="", font=("Segoe UI", 14, "bold"), background="#f7f4fa")
         self.bp_flush_alert.pack(fill=tk.X, padx=8, pady=8)
@@ -388,18 +384,8 @@ MUL R9, R8, R3    # R9 = R8 * R3"""
         # Última predição/flush
         if self.core.flush_needed:
             self.bp_flush_alert.config(text="⚠️ Flush/Misprediction detectado!", background="#fde68a", foreground="#b91c1c")
-            self.bp_last_label.config(text="Última predição: INCORRETA", foreground="#b91c1c")
         else:
             self.bp_flush_alert.config(text="", background="#f7f4fa")
-            self.bp_last_label.config(text="Última predição: CORRETA", foreground="#059669")
-        # Próxima predição
-        last_pred = self.core.get_last_branch_prediction()
-        if last_pred is not None:
-            pred_str = "Tomado" if last_pred['predicted_taken'] else "Não Tomado"
-            inst_str = f"{last_pred['opcode']} {' '.join(last_pred['operands'])}"
-            self.bp_next_label.config(text=f"Próxima predição: {pred_str} ({inst_str})", foreground="#2563eb")
-        else:
-            self.bp_next_label.config(text="Próxima predição: -", foreground="#2563eb")
 
     def _update_committed_instructions_panel(self):
         # Atualizar tabela de instruções commitadas

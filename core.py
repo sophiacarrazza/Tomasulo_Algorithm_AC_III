@@ -65,6 +65,7 @@ class TomasuloCore:
         self.misprediction_target_pc = -1 # Guarda o PC de destino correto após uma predição errada
         self.last_branch_prediction = None
         self.branch_history = []  # Histórico de branches executados
+        self.finished = False  # Indica se o programa terminou
 
     def save_state(self):
         # Salva uma cópia profunda do estado atual
@@ -100,6 +101,17 @@ class TomasuloCore:
         self.instructions = []
         self.label_map = {}
         self.committed_instructions = []  # Limpar instruções commitadas
+        
+        # Reset das métricas
+        self.metrics = {
+            'ipc': 0.0,
+            'stalls': 0,
+            'total_instructions': 0,
+            'completed_instructions': 0,
+            'bubbles': 0,
+            'mispredictions': 0,
+        }
+        
         lines = program_text.strip().split('\n')
         
         # Primeiro passo: Mapear todas as labels para seus PCs
@@ -137,9 +149,15 @@ class TomasuloCore:
         self.metrics['total_instructions'] = len(self.instructions)
 
     def cycle_step(self):
-        self.save_state() 
+        self.save_state()
+        
+        # Se não há mais trabalho, mas ainda há instruções no ROB, continue para commitá-las
         if not self._has_work_to_do():
-            return False
+            # Se ainda há instruções no ROB, continue para commitá-las
+            has_rob_entries = any(entry.state != 'Empty' for entry in self.rob.entries)
+            if not has_rob_entries:
+                self.finished = True
+                return False
 
         if self.flush_needed:
             self._flush_pipeline()
@@ -147,12 +165,11 @@ class TomasuloCore:
             self.cycle += 1
             self._update_metrics()
             return True
+            
         self._commit()
         self._execute()
         self._issue()
         self._write_result()
-        
-
         self._count_bubbles()
 
         # Atualiza IPC, stalls, etc
@@ -162,22 +179,16 @@ class TomasuloCore:
 
     def _has_work_to_do(self):
         """Verifica se ainda há trabalho para fazer"""
-        # Se o pipeline foi limpo, pode haver instruções no ROB para cometer
-        # mas o PC pode já ter chegado ao fim.
+        # Se ainda há instruções para executar
         if self.pc < len(self.instructions):
             return True
             
-        # Verificar se há instruções pendentes no ROB
+        # Se chegou ao fim das instruções, verificar se há instruções no ROB
         for entry in self.rob.entries:
             if entry.state != 'Empty':
                 return True
                 
-        # Verificar se há estações de reserva ocupadas
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy:
-                    return True
-                    
+        # Se não há instruções pendentes, o programa terminou
         return False
     
     def _count_bubbles(self):
@@ -189,206 +200,168 @@ class TomasuloCore:
         self.metrics['bubbles'] += bubbles_this_cycle
 
     def _issue(self):
-        """Fase de despacho de instruções - Superescalar (múltiplas instruções por ciclo)"""
+        """Fase de despacho de instruções"""
         
         # Não emite novas instruções se um flush estiver pendente
         if self.flush_needed:
             return
 
-        instructions_issued = 0
-        max_issue_per_cycle = 2 # Grau de superescalar
+        # Verificar se há espaço no ROB
+        if self.rob.entries[self.rob.tail].state != 'Empty':
+            self.metrics['stalls'] += 1 # Stall por falta de espaço no ROB
+            return
+
+        # Verificar se ainda há instruções para emitir
+        if self.pc >= len(self.instructions):
+            return
+
+        instruction = self.instructions[self.pc]
         
-        while self.pc < len(self.instructions) and instructions_issued < max_issue_per_cycle:
-            if self.rob.entries[self.rob.tail].state != 'Empty':
-                self.metrics['stalls'] += 1 # Stall por falta de espaço no ROB
-                break 
-
-            instruction = self.instructions[self.pc]
+        rs_type = self._get_rs_type(instruction['type'])
+        available_rs = self._find_available_rs(rs_type)
+        
+        if available_rs:
+            rob_entry_idx = self.rob.tail
+            rob_entry = self.rob.entries[rob_entry_idx]
             
-            rs_type = self._get_rs_type(instruction['type'])
-            available_rs = self._find_available_rs(rs_type)
-            
-            if available_rs:
-                rob_entry_idx = self.rob.tail
-                rob_entry = self.rob.entries[rob_entry_idx]
-                
-                # Preencher a entrada do ROB
-                rob_entry.state = 'Issued'
-                rob_entry.instruction = instruction
-                rob_entry.pc = instruction['pc']
+            # Preencher a entrada do ROB
+            rob_entry.state = 'Issued'
+            rob_entry.instruction = instruction
+            rob_entry.pc = instruction['pc']
 
-                # Lógica de desvio
-                is_branch = instruction['type'] == 'BRANCH'
-                predicted_taken = False
-                if is_branch:
-                    predicted_taken = self.bp.predict(instruction['pc'])
-                    rob_entry.destination = rob_entry_idx
-                    rob_entry.predicted_taken = predicted_taken
-                    rob_entry.target_pc = instruction.get('target_pc', -1)
+            # Lógica de desvio
+            is_branch = instruction['type'] == 'BRANCH'
+            predicted_taken = False
+            if is_branch:
+                predicted_taken = self.bp.predict(instruction['pc'])
+                rob_entry.destination = rob_entry_idx
+                rob_entry.predicted_taken = predicted_taken
+                rob_entry.target_pc = instruction.get('target_pc', -1)
+            else:
+                rob_entry.destination = instruction['operands'][0]
+
+            # Renomeação de registradores e captura de operandos
+            rs = available_rs
+            rs.busy = True
+            rs.op = instruction['opcode']
+            rs.dest = rob_entry_idx
+            
+            dest_reg = None
+            if not is_branch:
+                dest_reg = instruction['operands'][0]
+                rob_entry.old_tag = self.registers.tags.get(dest_reg)
+            
+            # Lógica de operandos simplificada
+            op = instruction['opcode']
+            ops = instruction['operands']
+            src1_reg, src2_reg, immediate = None, None, None
+
+            # Identificar operandos fonte
+            if op in ['ADD', 'SUB', 'MUL', 'DIV']: # R-type: op rd, rs, rt
+                src1_reg, src2_reg = ops[1], ops[2]
+            elif op in ['ADDI']: # I-type: op rt, rs, imm
+                src1_reg, immediate = ops[1], int(ops[2])
+            elif op in ['LW', 'SW']: # I-type: op rt, imm(rs)
+                src1_reg, immediate = ops[1], int(ops[2]) 
+            elif op in ['BEQ', 'BNE']: # I-type: op rs, rt, label
+                src1_reg, src2_reg = ops[0], ops[1]
+            
+            # Preencher Vj e Qj (Primeiro operando fonte)
+            if src1_reg:
+                tag = self.registers.tags.get(src1_reg)
+                if tag is None:
+                    rs.vj = self.registers.values.get(src1_reg, 0)
+                    rs.qj = None
                 else:
-                    rob_entry.destination = instruction['operands'][0]
-
-                # Renomeação de registradores e captura de operandos
-                rs = available_rs
-                rs.busy = True
-                rs.op = instruction['opcode']
-                rs.dest = rob_entry_idx
-                
-                dest_reg = None
-                if not is_branch:
-                    dest_reg = instruction['operands'][0]
-                    rob_entry.old_tag = self.registers.tags.get(dest_reg)
-                
-                # Lógica de operandos CORRIGIDA e REFINADA
-                op = instruction['opcode']
-                ops = instruction['operands']
-                src1_reg, src2_reg, immediate = None, None, None
-
-                # Identificar operandos fonte com base no formato da instrução MIPS
-                if op in ['ADD', 'SUB', 'MUL', 'DIV']: # R-type: op rd, rs, rt
-                    src1_reg, src2_reg = ops[1], ops[2]
-                elif op in ['ADDI']: # I-type: op rt, rs, imm
-                    src1_reg, immediate = ops[1], int(ops[2])
-                elif op in ['LW', 'SW']: # I-type: op rt, imm(rs)
-                    # Simplificação do parser: LW/SW rt, rs, imm
-                    src1_reg, immediate = ops[1], int(ops[2]) 
-                elif op in ['BEQ', 'BNE']: # I-type: op rs, rt, label
-                    src1_reg, src2_reg = ops[0], ops[1]
-                
-                # Preencher Vj e Qj (Primeiro operando fonte)
-                if src1_reg:
-                    tag = self.registers.tags.get(src1_reg)
-                    if tag is None:
-                        rs.vj = self.registers.values.get(src1_reg, 0)
+                    rob_dep_entry = self.rob.entries[tag]
+                    if rob_dep_entry.ready:
+                        rs.vj = rob_dep_entry.value
                         rs.qj = None
                     else:
-                        rob_dep_entry = self.rob.entries[tag]
-                        if rob_dep_entry.ready:
-                            rs.vj = rob_dep_entry.value
-                            rs.qj = None
-                        else:
-                            rs.qj = tag
-                
-                # Preencher Vk e Qk (Segundo operando fonte ou imediato)
-                if src2_reg:
-                    tag = self.registers.tags.get(src2_reg)
-                    if tag is None:
-                        rs.vk = self.registers.values.get(src2_reg, 0)
+                        rs.qj = tag
+            
+            # Preencher Vk e Qk (Segundo operando fonte ou imediato)
+            if src2_reg:
+                tag = self.registers.tags.get(src2_reg)
+                if tag is None:
+                    rs.vk = self.registers.values.get(src2_reg, 0)
+                    rs.qk = None
+                else:
+                    rob_dep_entry = self.rob.entries[tag]
+                    if rob_dep_entry.ready:
+                        rs.vk = rob_dep_entry.value
                         rs.qk = None
                     else:
-                        rob_dep_entry = self.rob.entries[tag]
-                        if rob_dep_entry.ready:
-                            rs.vk = rob_dep_entry.value
-                            rs.qk = None
-                        else:
-                            rs.qk = tag
-                elif immediate is not None:
-                    # Para ADDI, LW, o segundo valor vem do imediato
-                    rs.vk = immediate
-                    rs.qk = None
-                
-                rs.cycles_remaining = self._get_latency(instruction['opcode'])
-                
-                if not is_branch and dest_reg:
-                    self.registers.tags[dest_reg] = rob_entry_idx
-                
-                self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
-                instructions_issued += 1
+                        rs.qk = tag
+            elif immediate is not None:
+                rs.vk = immediate
+                rs.qk = None
+            
+            rs.cycles_remaining = self._get_latency(instruction['opcode'])
+            
+            if not is_branch and dest_reg:
+                self.registers.tags[dest_reg] = rob_entry_idx
+            
+            self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
 
-                # Atualizar PC para a próxima instrução (especulativamente)
-                if is_branch and predicted_taken:
-                    self.pc = rob_entry.target_pc
-                else:
-                    self.pc += 1
+            # Atualizar PC para a próxima instrução (especulativamente)
+            if is_branch and predicted_taken:
+                self.pc = rob_entry.target_pc
             else:
-                self.metrics['stalls'] += 1 # Stall por falta de ER
-                break # Não há estação de reserva, parar de emitir
+                self.pc += 1
+        else:
+            self.metrics['stalls'] += 1 # Stall por falta de ER
 
     def _execute(self):
         """Fase de execução das instruções prontas de forma superescalar."""
-        for rs in self.reservation_stations.stations['INT'] + self.reservation_stations.stations['FP'] + self.reservation_stations.stations['MEM']:
-            # Condição para executar: pronta e não já alocada a uma unidade
-            if rs.busy and rs.qj is None and rs.qk is None:
-                is_already_processing = any(unit['current_instruction'] is rs for unit in self.execution_units.values())
-                
-                if not is_already_processing:
-                    # Encontra uma unidade de execução livre do tipo correto
-                    unit_type_needed = self._get_execution_unit_type(rs.op)
-                    for unit_name, unit_state in self.execution_units.items():
-                        if unit_name.startswith(unit_type_needed) and not unit_state['busy']:
-                            unit_state['busy'] = True
-                            unit_state['current_instruction'] = rs
-                            break # Alocou, passa para a próxima ER
-
-        # Decrementar contadores e finalizar execução para TODAS as unidades em paralelo
-        for unit, state in self.execution_units.items():
-            if state['busy'] and state['current_instruction'] is not None:
-                rs = state['current_instruction']
-                
-                if rs.cycles_remaining > 0:
-                    rs.cycles_remaining -= 1
-                
-                if rs.cycles_remaining == 0:
-                    rob_entry = self.rob.entries[rs.dest]
-                    result = self._execute_instruction(rs.op, rs.vj, rs.vk)
-                    
-                    if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
-                        # Salve a predição feita ANTES do update (o que o preditor achava)
-                        predicted = self.bp.predict(rob_entry.pc)
-                        actual_taken = bool(result)
-                        rob_entry.actual_outcome = actual_taken
-
-                        # Salve no histórico
-                        self.branch_history.append({
-                            'pc': rob_entry.pc,
-                            'predicted': predicted,
-                            'actual': actual_taken,
-                            'opcode': rob_entry.instruction['opcode'],
-                            'operands': rob_entry.instruction['operands']
-                        })
-
-                        self.last_branch_prediction = {
-                            'pc': rob_entry.pc,
-                            'predicted_taken': predicted,
-                            'opcode': rob_entry.instruction['opcode'],
-                            'operands': rob_entry.instruction['operands']
-                        }
-
-                        self.bp.update(rob_entry.pc, actual_taken)
-
-                        if rob_entry.predicted_taken != actual_taken:
-                            self.metrics['mispredictions'] += 1
-                            self.flush_needed = True
-                            self.flush_rob_entry_index = rs.dest
-                            if actual_taken:
-                                self.misprediction_target_pc = rob_entry.target_pc
-                            else:
-                                self.misprediction_target_pc = rob_entry.pc + 1
-                    
-                    rs.result = result
-                    rs.ready = True
-                    
-                    # Libera a unidade de execução para o próximo ciclo
-                    state['busy'] = False
-                    state['current_instruction'] = None
-
-    def _execute_memory_operations(self):
-        """Executa operações de memória em paralelo"""
-        # Buscar instruções de memória prontas para execução
+        # Executar todas as instruções prontas (qj e qk são None)
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
-                if (rs.busy and rs.qj is None and rs.qk is None and 
-                    rs.op in ['LW', 'SW'] and rs.cycles_remaining > 0):
-                    rs.cycles_remaining -= 1
+                if rs.busy and rs.qj is None and rs.qk is None:
+                    if rs.cycles_remaining > 0:
+                        rs.cycles_remaining -= 1
+                    
                     if rs.cycles_remaining == 0:
-                        if rs.op == 'LW':
-                            # Load: usar vj como endereço
-                            result = self.memory.get(rs.vj, 0)
-                        else:  # SW
-                            # Store: usar vj como endereço, vk como valor
-                            self.memory[rs.vj] = rs.vk
-                            result = rs.vk
-                        rs.result = int(result) if result is not None else 0
+                        rob_entry = self.rob.entries[rs.dest]
+                        result = self._execute_instruction(rs.op, rs.vj, rs.vk)
+                        
+                        if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+                            # Salve a predição feita ANTES do update (o que o preditor achava)
+                            predicted = self.bp.predict(rob_entry.pc)
+                            actual_taken = bool(result)
+                            rob_entry.actual_outcome = actual_taken
+
+                            # Salve no histórico
+                            self.branch_history.append({
+                                'pc': rob_entry.pc,
+                                'predicted': predicted,
+                                'actual': actual_taken,
+                                'opcode': rob_entry.instruction['opcode'],
+                                'operands': rob_entry.instruction['operands']
+                            })
+
+                            self.last_branch_prediction = {
+                                'pc': rob_entry.pc,
+                                'predicted_taken': predicted,
+                                'opcode': rob_entry.instruction['opcode'],
+                                'operands': rob_entry.instruction['operands']
+                            }
+
+                            self.bp.update(rob_entry.pc, actual_taken)
+
+                            if rob_entry.predicted_taken != actual_taken:
+                                self.metrics['mispredictions'] += 1
+                                self.flush_needed = True
+                                self.flush_rob_entry_index = rs.dest
+                                if actual_taken:
+                                    self.misprediction_target_pc = rob_entry.target_pc
+                                else:
+                                    self.misprediction_target_pc = rob_entry.pc + 1
+                                # Adiciona +2 bolhas se previu 'não desviar' e desviou
+                                if not rob_entry.predicted_taken and actual_taken:
+                                    self.metrics['bubbles'] += 2
+                        
+                        rs.result = result
                         rs.ready = True
 
     def _write_result(self):
