@@ -168,11 +168,11 @@ class TomasuloGUI(tk.Tk):
         bp_frame = ttk.Frame(self.notebook)
         self.notebook.add(bp_frame, text="Preditor de Desvio")
         # Tabela do preditor
-        columns = ("PC", "Previsão Atual")
+        columns = ("PC", "Predição", "Resultado")
         self.bp_tree = ttk.Treeview(bp_frame, columns=columns, show='headings', height=10, style='Treeview')
         for col in columns:
             self.bp_tree.heading(col, text=col)
-            self.bp_tree.column(col, width=180, anchor=tk.CENTER)
+            self.bp_tree.column(col, width=120, anchor=tk.CENTER)
         bp_scrollbar = ttk.Scrollbar(bp_frame, orient=tk.VERTICAL, command=self.bp_tree.yview)
         self.bp_tree.configure(yscrollcommand=bp_scrollbar.set)
         self.bp_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -186,6 +186,8 @@ class TomasuloGUI(tk.Tk):
         self.bp_total_label.pack(anchor=tk.W, pady=2)
         self.bp_last_label = ttk.Label(metrics_frame, text="Última predição: -", font=("Segoe UI", 12), foreground="#222")
         self.bp_last_label.pack(anchor=tk.W, pady=2)
+        self.bp_next_label = ttk.Label(metrics_frame, text="Próxima predição: -", font=("Segoe UI", 12), foreground="#2563eb")
+        self.bp_next_label.pack(anchor=tk.W, pady=2)
         # Alerta visual de flush
         self.bp_flush_alert = ttk.Label(bp_frame, text="", font=("Segoe UI", 14, "bold"), background="#f7f4fa")
         self.bp_flush_alert.pack(fill=tk.X, padx=8, pady=8)
@@ -371,17 +373,17 @@ MUL R9, R8, R3    # R9 = R8 * R3"""
 
     def _update_branch_predictor_panel(self):
         # Limpar tabela
-        for row in self.bp_tree.get_children():
-            self.bp_tree.delete(row)
-        # Preencher tabela com o histórico do preditor
-        bht = self.core.bp.branch_history_table
-        for pc, taken in bht.items():
-            pred = "Tomado" if taken else "Não Tomado"
-            self.bp_tree.insert("", tk.END, values=(str(pc), pred))
+        self.bp_tree.delete(*self.bp_tree.get_children())
+        branch_history = self.core.get_branch_history()
+        for entry in branch_history:
+            pred = "Tomado" if entry['predicted'] else "Não Tomado"
+            res = "Tomado" if entry['actual'] else "Não Tomado"
+            pc = str(entry['pc'])
+            self.bp_tree.insert("", tk.END, values=(pc, pred, res))
         # Atualizar métricas
         mispred = self.core.metrics.get('mispredictions', 0)
         self.bp_mispred_label.config(text=f"Mispredictions: {mispred}")
-        total_preds = len(bht)
+        total_preds = len(branch_history)
         self.bp_total_label.config(text=f"Total de Previsões: {total_preds}")
         # Última predição/flush
         if self.core.flush_needed:
@@ -390,6 +392,14 @@ MUL R9, R8, R3    # R9 = R8 * R3"""
         else:
             self.bp_flush_alert.config(text="", background="#f7f4fa")
             self.bp_last_label.config(text="Última predição: CORRETA", foreground="#059669")
+        # Próxima predição
+        last_pred = self.core.get_last_branch_prediction()
+        if last_pred is not None:
+            pred_str = "Tomado" if last_pred['predicted_taken'] else "Não Tomado"
+            inst_str = f"{last_pred['opcode']} {' '.join(last_pred['operands'])}"
+            self.bp_next_label.config(text=f"Próxima predição: {pred_str} ({inst_str})", foreground="#2563eb")
+        else:
+            self.bp_next_label.config(text="Próxima predição: -", foreground="#2563eb")
 
     def _update_committed_instructions_panel(self):
         # Atualizar tabela de instruções commitadas
@@ -398,16 +408,11 @@ MUL R9, R8, R3    # R9 = R8 * R3"""
         
         for inst in committed_instructions:
             instruction_str = f"{inst['instruction']['opcode']} {' '.join(inst['instruction']['operands'])}" if inst['instruction'] else ""
-            
-            # Verificar se é uma instrução de desvio
-            is_branch = inst['instruction']['opcode'] in ['BEQ', 'BNE'] if inst['instruction'] else False
-            destination = "---" if is_branch else inst['destination']
-            
             self.committed_tree.insert('', 'end', values=(
                 inst['cycle_committed'],
                 inst['rob_index'],
                 instruction_str,
-                destination,
+                inst['destination'],
                 inst['value'],
                 "Commit"
             ))

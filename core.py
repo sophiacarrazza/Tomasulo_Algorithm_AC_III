@@ -63,6 +63,8 @@ class TomasuloCore:
         self.label_map = {} # Mapeia labels para endereços de PC
         self.flush_rob_entry_index = -1 # Guarda o índice do ROB da instrução de desvio que causou o flush
         self.misprediction_target_pc = -1 # Guarda o PC de destino correto após uma predição errada
+        self.last_branch_prediction = None
+        self.branch_history = []  # Histórico de branches executados
 
     def save_state(self):
         # Salva uma cópia profunda do estado atual
@@ -331,8 +333,27 @@ class TomasuloCore:
                     result = self._execute_instruction(rs.op, rs.vj, rs.vk)
                     
                     if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+                        # Salve a predição feita ANTES do update (o que o preditor achava)
+                        predicted = self.bp.predict(rob_entry.pc)
                         actual_taken = bool(result)
                         rob_entry.actual_outcome = actual_taken
+
+                        # Salve no histórico
+                        self.branch_history.append({
+                            'pc': rob_entry.pc,
+                            'predicted': predicted,
+                            'actual': actual_taken,
+                            'opcode': rob_entry.instruction['opcode'],
+                            'operands': rob_entry.instruction['operands']
+                        })
+
+                        self.last_branch_prediction = {
+                            'pc': rob_entry.pc,
+                            'predicted_taken': predicted,
+                            'opcode': rob_entry.instruction['opcode'],
+                            'operands': rob_entry.instruction['operands']
+                        }
+
                         self.bp.update(rob_entry.pc, actual_taken)
 
                         if rob_entry.predicted_taken != actual_taken:
@@ -640,3 +661,11 @@ class TomasuloCore:
     def _get_committed_instructions_state(self):
         """Retorna o estado das instruções commitadas para a GUI"""
         return self.committed_instructions.copy()
+
+    def get_last_branch_prediction(self):
+        """Retorna a última predição de desvio executada (ou None se não houver)."""
+        return self.last_branch_prediction
+
+    def get_branch_history(self):
+        """Retorna o histórico de branches executados para a GUI."""
+        return self.branch_history
