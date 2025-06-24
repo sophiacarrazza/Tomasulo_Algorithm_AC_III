@@ -192,12 +192,7 @@ class TomasuloCore:
         return False
     
     def _count_bubbles(self):
-        bubbles_this_cycle = 0
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy and (rs.qj is not None or rs.qk is not None):
-                    bubbles_this_cycle += 1
-        self.metrics['bubbles'] += bubbles_this_cycle
+        pass  # Não faz nada, bolhas só são incrementadas na predição errada de não desvio
 
     def _issue(self):
         """Fase de despacho de instruções"""
@@ -320,49 +315,47 @@ class TomasuloCore:
                 if rs.busy and rs.qj is None and rs.qk is None:
                     if rs.cycles_remaining > 0:
                         rs.cycles_remaining -= 1
-                    
-                    if rs.cycles_remaining == 0:
+                        # Atualiza o estado do ROB para 'Executing' durante a execução
                         rob_entry = self.rob.entries[rs.dest]
-                        result = self._execute_instruction(rs.op, rs.vj, rs.vk)
-                        
-                        if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
-                            # Salve a predição feita ANTES do update (o que o preditor achava)
-                            predicted = self.bp.predict(rob_entry.pc)
-                            actual_taken = bool(result)
-                            rob_entry.actual_outcome = actual_taken
-
-                            # Salve no histórico
-                            self.branch_history.append({
-                                'pc': rob_entry.pc,
-                                'predicted': predicted,
-                                'actual': actual_taken,
-                                'opcode': rob_entry.instruction['opcode'],
-                                'operands': rob_entry.instruction['operands']
-                            })
-
-                            self.last_branch_prediction = {
-                                'pc': rob_entry.pc,
-                                'predicted_taken': predicted,
-                                'opcode': rob_entry.instruction['opcode'],
-                                'operands': rob_entry.instruction['operands']
-                            }
-
-                            self.bp.update(rob_entry.pc, actual_taken)
-
-                            if rob_entry.predicted_taken != actual_taken:
-                                self.metrics['mispredictions'] += 1
-                                self.flush_needed = True
-                                self.flush_rob_entry_index = rs.dest
-                                if actual_taken:
-                                    self.misprediction_target_pc = rob_entry.target_pc
-                                else:
-                                    self.misprediction_target_pc = rob_entry.pc + 1
-                                # Adiciona +2 bolhas se previu 'não desviar' e desviou
-                                if not rob_entry.predicted_taken and actual_taken:
-                                    self.metrics['bubbles'] += 2
-                        
-                        rs.result = result
-                        rs.ready = True
+                        if rob_entry.state == 'Issued':
+                            rob_entry.state = 'Executing'
+                    elif rs.cycles_remaining == 0:
+                        rob_entry = self.rob.entries[rs.dest]
+                        # Se acabou de chegar em 0, mas ainda não está como Executing, só muda o estado
+                        if rob_entry.state == 'Issued':
+                            rob_entry.state = 'Executing'
+                        elif rob_entry.state == 'Executing' and not rs.ready:
+                            result = self._execute_instruction(rs.op, rs.vj, rs.vk)
+                            if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+                                predicted = self.bp.predict(rob_entry.pc)
+                                actual_taken = bool(result)
+                                rob_entry.actual_outcome = actual_taken
+                                self.branch_history.append({
+                                    'pc': rob_entry.pc,
+                                    'predicted': predicted,
+                                    'actual': actual_taken,
+                                    'opcode': rob_entry.instruction['opcode'],
+                                    'operands': rob_entry.instruction['operands']
+                                })
+                                self.last_branch_prediction = {
+                                    'pc': rob_entry.pc,
+                                    'predicted_taken': predicted,
+                                    'opcode': rob_entry.instruction['opcode'],
+                                    'operands': rob_entry.instruction['operands']
+                                }
+                                self.bp.update(rob_entry.pc, actual_taken)
+                                if rob_entry.predicted_taken != actual_taken:
+                                    self.metrics['mispredictions'] += 1
+                                    self.flush_needed = True
+                                    self.flush_rob_entry_index = rs.dest
+                                    if actual_taken:
+                                        self.misprediction_target_pc = rob_entry.target_pc
+                                    else:
+                                        self.misprediction_target_pc = rob_entry.pc + 1
+                                    if not rob_entry.predicted_taken and actual_taken:
+                                        self.metrics['bubbles'] += 2
+                            rs.result = result
+                            rs.ready = True
 
     def _write_result(self):
         """Fase de escrita de resultados"""
@@ -377,7 +370,8 @@ class TomasuloCore:
                         rob_entry = self.rob.entries[rs.dest]
                         rob_entry.value = rs.result
                         rob_entry.ready = True
-                        rob_entry.state = 'Writeback'
+                        if rob_entry.state == 'Executing':
+                            rob_entry.state = 'Writeback'
                     
                     # A estação permanece ocupada até o commit
                     rs.ready = False # Previne re-broadcast no próximo ciclo

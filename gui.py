@@ -67,9 +67,6 @@ class TomasuloGUI(tk.Tk):
         ttk.Label(info_frame, text="Ciclo:", font=("Segoe UI", 13, "bold"), background="#ede9fe").pack(side=tk.LEFT)
         self.cycle_label = ttk.Label(info_frame, text="0", font=("Segoe UI", 13, "bold"), background="#ede9fe", foreground="#7c3aed")
         self.cycle_label.pack(side=tk.LEFT, padx=(5, 24))
-        ttk.Label(info_frame, text="Instrução Atual:", font=("Segoe UI", 13, "bold"), background="#ede9fe").pack(side=tk.LEFT)
-        self.current_inst_label = ttk.Label(info_frame, text="0", font=("Segoe UI", 13, "bold"), background="#ede9fe", foreground="#7c3aed")
-        self.current_inst_label.pack(side=tk.LEFT, padx=(5, 24))
         ttk.Label(info_frame, text="Total:", font=("Segoe UI", 13, "bold"), background="#ede9fe").pack(side=tk.LEFT)
         self.total_inst_label = ttk.Label(info_frame, text="0", font=("Segoe UI", 13, "bold"), background="#ede9fe", foreground="#7c3aed")
         self.total_inst_label.pack(side=tk.LEFT, padx=5)
@@ -295,7 +292,6 @@ MUL R9, R8, R3    # R9 = R8 * R3"""
     def update_gui(self):
         # Atualizar informações do ciclo e instruções
         self.cycle_label.config(text=str(self.core.cycle), foreground="#7c3aed")
-        self.current_inst_label.config(text=str(self.core.pc), foreground="#7c3aed")
         self.total_inst_label.config(text=str(self.core.metrics['total_instructions']), foreground="#7c3aed")
         
         # Atualizar métricas de desempenho
