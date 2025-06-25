@@ -36,6 +36,7 @@ class TomasuloCore:
         self.cdb = CommonDataBus()
         self.registers = RegisterBank()
         self.bp = OneBitPredictor()
+        self.committed_instructions = []  # Lista para rastrear instruções commitadas
         self.metrics = {
             'ipc': 0.0,
             'stalls': 0,
@@ -62,6 +63,8 @@ class TomasuloCore:
         self.label_map = {} # Mapeia labels para endereços de PC
         self.flush_rob_entry_index = -1 # Guarda o índice do ROB da instrução de desvio que causou o flush
         self.misprediction_target_pc = -1 # Guarda o PC de destino correto após uma predição errada
+        self.last_branch_prediction = None
+        self.branch_history = []  # Histórico de branches executados
 
     def save_state(self):
         # Salva uma cópia profunda do estado atual
@@ -72,6 +75,7 @@ class TomasuloCore:
             'reservation_stations': copy.deepcopy(self.reservation_stations),
             'rob': copy.deepcopy(self.rob),
             'registers': copy.deepcopy(self.registers),
+            'committed_instructions': copy.deepcopy(self.committed_instructions),
             'pc': self.pc,
             'flush_needed': self.flush_needed,
             # Adicione outros componentes se necessário
@@ -87,6 +91,7 @@ class TomasuloCore:
             self.reservation_stations = copy.deepcopy(state['reservation_stations'])
             self.rob = copy.deepcopy(state['rob'])
             self.registers = copy.deepcopy(state['registers'])
+            self.committed_instructions = copy.deepcopy(state['committed_instructions'])
             self.pc = state['pc']
             self.flush_needed = state['flush_needed']
 
@@ -94,6 +99,7 @@ class TomasuloCore:
         """Carrega um programa MIPS, mapeando labels primeiro."""
         self.instructions = []
         self.label_map = {}
+        self.committed_instructions = []  # Limpar instruções commitadas
         lines = program_text.strip().split('\n')
         
         # Primeiro passo: Mapear todas as labels para seus PCs
@@ -147,8 +153,6 @@ class TomasuloCore:
         self._write_result()
         
 
-        self._count_bubbles()
-
         # Atualiza IPC, stalls, etc
         self.cycle += 1
         self._update_metrics()
@@ -174,43 +178,26 @@ class TomasuloCore:
                     
         return False
     
-    def _count_bubbles(self):
-        bubbles_this_cycle = 0
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy and (rs.qj is not None or rs.qk is not None):
-                    bubbles_this_cycle += 1
-        self.metrics['bubbles'] += bubbles_this_cycle
-
     def _issue(self):
-        """Fase de despacho de instruções - Superescalar (múltiplas instruções por ciclo)"""
-        
-        # Não emite novas instruções se um flush estiver pendente
+        """Fase de despacho de instruções (superescalar: até 2 por ciclo, para no branch ou falta de recursos)"""
         if self.flush_needed:
             return
-
         instructions_issued = 0
         max_issue_per_cycle = 2 # Grau de superescalar
-        
         while self.pc < len(self.instructions) and instructions_issued < max_issue_per_cycle:
             if self.rob.entries[self.rob.tail].state != 'Empty':
                 self.metrics['stalls'] += 1 # Stall por falta de espaço no ROB
-                break 
-
+                break
             instruction = self.instructions[self.pc]
-            
             rs_type = self._get_rs_type(instruction['type'])
             available_rs = self._find_available_rs(rs_type)
-            
             if available_rs:
                 rob_entry_idx = self.rob.tail
                 rob_entry = self.rob.entries[rob_entry_idx]
-                
                 # Preencher a entrada do ROB
                 rob_entry.state = 'Issued'
                 rob_entry.instruction = instruction
                 rob_entry.pc = instruction['pc']
-
                 # Lógica de desvio
                 is_branch = instruction['type'] == 'BRANCH'
                 predicted_taken = False
@@ -221,34 +208,28 @@ class TomasuloCore:
                     rob_entry.target_pc = instruction.get('target_pc', -1)
                 else:
                     rob_entry.destination = instruction['operands'][0]
-
                 # Renomeação de registradores e captura de operandos
                 rs = available_rs
                 rs.busy = True
                 rs.op = instruction['opcode']
                 rs.dest = rob_entry_idx
-                
                 dest_reg = None
                 if not is_branch:
                     dest_reg = instruction['operands'][0]
                     rob_entry.old_tag = self.registers.tags.get(dest_reg)
-                
                 # Lógica de operandos CORRIGIDA e REFINADA
                 op = instruction['opcode']
                 ops = instruction['operands']
                 src1_reg, src2_reg, immediate = None, None, None
-
                 # Identificar operandos fonte com base no formato da instrução MIPS
-                if op in ['ADD', 'SUB', 'MUL', 'DIV']: # R-type: op rd, rs, rt
+                if op in ['ADD', 'SUB', 'MUL', 'DIV']:
                     src1_reg, src2_reg = ops[1], ops[2]
-                elif op in ['ADDI']: # I-type: op rt, rs, imm
+                elif op in ['ADDI']:
                     src1_reg, immediate = ops[1], int(ops[2])
-                elif op in ['LW', 'SW']: # I-type: op rt, imm(rs)
-                    # Simplificação do parser: LW/SW rt, rs, imm
-                    src1_reg, immediate = ops[1], int(ops[2]) 
-                elif op in ['BEQ', 'BNE']: # I-type: op rs, rt, label
+                elif op in ['LW', 'SW']:
+                    src1_reg, immediate = ops[1], int(ops[2])
+                elif op in ['BEQ', 'BNE']:
                     src1_reg, src2_reg = ops[0], ops[1]
-                
                 # Preencher Vj e Qj (Primeiro operando fonte)
                 if src1_reg:
                     tag = self.registers.tags.get(src1_reg)
@@ -262,7 +243,6 @@ class TomasuloCore:
                             rs.qj = None
                         else:
                             rs.qj = tag
-                
                 # Preencher Vk e Qk (Segundo operando fonte ou imediato)
                 if src2_reg:
                     tag = self.registers.tags.get(src2_reg)
@@ -277,21 +257,17 @@ class TomasuloCore:
                         else:
                             rs.qk = tag
                 elif immediate is not None:
-                    # Para ADDI, LW, o segundo valor vem do imediato
                     rs.vk = immediate
                     rs.qk = None
-                
                 rs.cycles_remaining = self._get_latency(instruction['opcode'])
-                
                 if not is_branch and dest_reg:
                     self.registers.tags[dest_reg] = rob_entry_idx
-                
                 self.rob.tail = (self.rob.tail + 1) % len(self.rob.entries)
                 instructions_issued += 1
-
                 # Atualizar PC para a próxima instrução (especulativamente)
                 if is_branch and predicted_taken:
                     self.pc = rob_entry.target_pc
+                    break # Para no branch
                 else:
                     self.pc += 1
             else:
@@ -304,7 +280,7 @@ class TomasuloCore:
             # Condição para executar: pronta e não já alocada a uma unidade
             if rs.busy and rs.qj is None and rs.qk is None:
                 is_already_processing = any(unit['current_instruction'] is rs for unit in self.execution_units.values())
-                
+                rob_entry = self.rob.entries[rs.dest]
                 if not is_already_processing:
                     # Encontra uma unidade de execução livre do tipo correto
                     unit_type_needed = self._get_execution_unit_type(rs.op)
@@ -312,38 +288,53 @@ class TomasuloCore:
                         if unit_name.startswith(unit_type_needed) and not unit_state['busy']:
                             unit_state['busy'] = True
                             unit_state['current_instruction'] = rs
+                            # Assim que a instrução começa a executar, mude para 'Executing'
+                            if rob_entry.state == 'Issued':
+                                rob_entry.state = 'Executing'
                             break # Alocou, passa para a próxima ER
 
         # Decrementar contadores e finalizar execução para TODAS as unidades em paralelo
         for unit, state in self.execution_units.items():
             if state['busy'] and state['current_instruction'] is not None:
                 rs = state['current_instruction']
-                
-                if rs.cycles_remaining > 0:
-                    rs.cycles_remaining -= 1
-                
-                if rs.cycles_remaining == 0:
-                    rob_entry = self.rob.entries[rs.dest]
+                rob_entry = self.rob.entries[rs.dest]
+                if rob_entry.state == 'Issued':
+                    # Primeiro ciclo após despacho: só muda para Executing
+                    rob_entry.state = 'Executing'
+                elif rob_entry.state == 'Executing':
+                    # Segundo ciclo: executa e vai para Writeback
                     result = self._execute_instruction(rs.op, rs.vj, rs.vk)
-                    
                     if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+                        predicted = self.bp.predict(rob_entry.pc)
                         actual_taken = bool(result)
                         rob_entry.actual_outcome = actual_taken
+                        self.branch_history.append({
+                            'pc': rob_entry.pc,
+                            'predicted': predicted,
+                            'actual': actual_taken,
+                            'opcode': rob_entry.instruction['opcode'],
+                            'operands': rob_entry.instruction['operands']
+                        })
+                        self.last_branch_prediction = {
+                            'pc': rob_entry.pc,
+                            'predicted_taken': predicted,
+                            'opcode': rob_entry.instruction['opcode'],
+                            'operands': rob_entry.instruction['operands']
+                        }
                         self.bp.update(rob_entry.pc, actual_taken)
-
                         if rob_entry.predicted_taken != actual_taken:
                             self.metrics['mispredictions'] += 1
+                            # Conta bolhas apenas quando predição foi "não desvio" mas na verdade aconteceu o desvio
+                            if not rob_entry.predicted_taken and actual_taken:
+                                self.metrics['bubbles'] += 2  # 2 bolhas por predição incorreta de "não desvio"
                             self.flush_needed = True
                             self.flush_rob_entry_index = rs.dest
                             if actual_taken:
                                 self.misprediction_target_pc = rob_entry.target_pc
                             else:
                                 self.misprediction_target_pc = rob_entry.pc + 1
-                    
                     rs.result = result
                     rs.ready = True
-                    
-                    # Libera a unidade de execução para o próximo ciclo
                     state['busy'] = False
                     state['current_instruction'] = None
 
@@ -352,15 +343,14 @@ class TomasuloCore:
         # Buscar instruções de memória prontas para execução
         for rs_type, stations in self.reservation_stations.stations.items():
             for rs in stations:
-                if (rs.busy and rs.qj is None and rs.qk is None and 
-                    rs.op in ['LW', 'SW'] and rs.cycles_remaining > 0):
-                    rs.cycles_remaining -= 1
-                    if rs.cycles_remaining == 0:
+                if (rs.busy and rs.qj is None and rs.qk is None and rs.op in ['LW', 'SW']):
+                    rob_entry = self.rob.entries[rs.dest]
+                    if rob_entry.state == 'Issued':
+                        rob_entry.state = 'Executing'
+                    elif rob_entry.state == 'Executing':
                         if rs.op == 'LW':
-                            # Load: usar vj como endereço
                             result = self.memory.get(rs.vj, 0)
-                        else:  # SW
-                            # Store: usar vj como endereço, vk como valor
+                        else:
                             self.memory[rs.vj] = rs.vk
                             result = rs.vk
                         rs.result = int(result) if result is not None else 0
@@ -396,6 +386,16 @@ class TomasuloCore:
                 break
 
             if rob_entry.ready and rob_entry.instruction:
+                # Adicionar instrução à lista de commitadas
+                committed_inst = {
+                    'instruction': rob_entry.instruction,
+                    'cycle_committed': self.cycle,
+                    'rob_index': self.rob.head,
+                    'destination': rob_entry.destination,
+                    'value': rob_entry.value
+                }
+                self.committed_instructions.append(committed_inst)
+                
                 if rob_entry.instruction['type'] != 'BRANCH':
                     dest_reg = rob_entry.destination
                     if isinstance(dest_reg, str) and self.registers.tags.get(dest_reg) == self.rob.head:
@@ -483,18 +483,15 @@ class TomasuloCore:
         """Retorna a latência de uma instrução"""
         latencies = {
             # Instruções aritméticas básicas
-            'ADD': 1, 'SUB': 1, 'MUL': 3, 'DIV': 10,
-            
+            'ADD': 2, 'SUB': 2, 'MUL': 2, 'DIV': 2,
             # Instruções de imediato
-            'ADDI': 1,
-            
+            'ADDI': 2,
             # Instruções de memória
-            'LW': 2, 'SW': 1,
-            
+            'LW': 2, 'SW': 2,
             # Instruções de branch
-            'BEQ': 1, 'BNE': 1
+            'BEQ': 2, 'BNE': 2
         }
-        return latencies.get(opcode, 1)
+        return latencies.get(opcode, 2)
 
     def _update_waiting_stations(self, tag, value):
         """Atualiza estações de reserva que esperam por um resultado"""
@@ -614,11 +611,23 @@ class TomasuloCore:
         return rs_state
 
     def _get_register_state(self):
-        """Retorna o estado dos registradores"""
-        reg_state = {}
-        for reg_name in self.registers.registers:
-            reg_state[reg_name] = {
+        """Retorna o estado dos registradores para a GUI"""
+        register_state = {}
+        for reg_name in self.registers.values.keys():
+            register_state[reg_name] = {
                 'value': self.registers.values[reg_name],
                 'tag': self.registers.tags[reg_name]
             }
-        return reg_state
+        return register_state
+
+    def _get_committed_instructions_state(self):
+        """Retorna o estado das instruções commitadas para a GUI"""
+        return self.committed_instructions.copy()
+
+    def get_last_branch_prediction(self):
+        """Retorna a última predição de desvio executada (ou None se não houver)."""
+        return self.last_branch_prediction
+
+    def get_branch_history(self):
+        """Retorna o histórico de branches executados para a GUI."""
+        return self.branch_history
