@@ -7,23 +7,21 @@ class OneBitPredictor:
     resultado de cada instrução de desvio.
     """
     def __init__(self):
-        # A BHT armazena o último resultado (True para Tomado, False para Não Tomado).
-        # O padrão é False (Não Tomado) para desvios nunca vistos antes.
-        self.branch_history_table = defaultdict(lambda: False)
+        self.last_result = False  # bit global
 
     def predict(self, pc):
         """
         Prevê o resultado de um desvio com base no seu endereço (PC).
         Retorna True se a previsão for 'Tomado', False caso contrário.
         """
-        return self.branch_history_table[pc]
+        return self.last_result
 
     def update(self, pc, taken):
         """
         Atualiza a BHT com o resultado real do desvio.
         'taken' é um booleano: True se o desvio foi tomado, False caso contrário.
         """
-        self.branch_history_table[pc] = taken
+        self.last_result = taken
 
     def __str__(self):
-        return "1-Bit Dynamic Predictor"
+        return "1-Bit Global Predictor"

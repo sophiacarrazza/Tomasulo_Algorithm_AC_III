@@ -8,6 +8,11 @@ def parse_instruction(line):
         return None
     
     opcode = parts[0]
+    
+    # Ignorar 'FIM' (case insensitive)
+    if opcode.upper() == 'FIM':
+        return None
+    
     operands = parts[1:] if len(parts) > 1 else []
     
     return {

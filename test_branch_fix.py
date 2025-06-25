@@ -83,5 +83,12 @@ ADDI R7, R0, 400  # R7 = 400"""
     print(f"\nPreditor de desvio: {core.bp}")
     print(f"Tabela de histórico: {dict(core.bp.branch_history_table)}")
 
+    # No método _execute, ao finalizar o branch:
+    if rob_entry.instruction and rob_entry.instruction['type'] == 'BRANCH':
+        actual_taken = bool(result)
+        # Atualize o último branch no histórico:
+        if self.branch_history and self.branch_history[-1]['pc'] == rob_entry.pc and self.branch_history[-1]['actual'] is None:
+            self.branch_history[-1]['actual'] = actual_taken
+
 if __name__ == "__main__":
-    test_branch_fix() 
+   
