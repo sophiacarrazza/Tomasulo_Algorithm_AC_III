@@ -153,8 +153,6 @@ class TomasuloCore:
         self._write_result()
         
 
-        self._count_bubbles()
-
         # Atualiza IPC, stalls, etc
         self.cycle += 1
         self._update_metrics()
@@ -180,14 +178,6 @@ class TomasuloCore:
                     
         return False
     
-    def _count_bubbles(self):
-        bubbles_this_cycle = 0
-        for rs_type, stations in self.reservation_stations.stations.items():
-            for rs in stations:
-                if rs.busy and (rs.qj is not None or rs.qk is not None):
-                    bubbles_this_cycle += 1
-        self.metrics['bubbles'] += bubbles_this_cycle
-
     def _issue(self):
         """Fase de despacho de instruções (superescalar: até 2 por ciclo, para no branch ou falta de recursos)"""
         if self.flush_needed:
@@ -334,6 +324,9 @@ class TomasuloCore:
                         self.bp.update(rob_entry.pc, actual_taken)
                         if rob_entry.predicted_taken != actual_taken:
                             self.metrics['mispredictions'] += 1
+                            # Conta bolhas apenas quando predição foi "não desvio" mas na verdade aconteceu o desvio
+                            if not rob_entry.predicted_taken and actual_taken:
+                                self.metrics['bubbles'] += 2  # 2 bolhas por predição incorreta de "não desvio"
                             self.flush_needed = True
                             self.flush_rob_entry_index = rs.dest
                             if actual_taken:
